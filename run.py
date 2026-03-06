@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 One-click launcher for Retail Inventory System
-Usage: python run.py [preprocess|train|detect|gui]
+Usage: python run.py [setup|preprocess|train|detect|gui|api|ros2]
 """
 
 import sys
@@ -11,36 +11,55 @@ from pathlib import Path
 
 def main():
     parser = argparse.ArgumentParser(description='Retail Inventory System')
-    parser.add_argument('command', choices=['setup', 'preprocess', 'train', 'detect', 'gui', 'all'],
+    parser.add_argument('command', choices=['setup', 'preprocess', 'train', 'detect', 'gui', 'api', 'ros2', 'all'],
                        help='Command to run')
     parser.add_argument('--source', default='0', help='Video source for detection')
     parser.add_argument('--model', default='yolov8n.pt', help='Model to use')
-    
+    parser.add_argument('--host', default='0.0.0.0', help='API host')
+    parser.add_argument('--port', type=int, default=8000, help='API port')
+    parser.add_argument('--reload', action='store_true', help='Enable API auto-reload')
+
     args = parser.parse_args()
-    
+
     if args.command == 'setup':
         print("🔧 Installing dependencies...")
         subprocess.run([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
         print("✅ Setup complete!")
-    
+
     elif args.command == 'preprocess':
         print("📊 Running preprocessing...")
         subprocess.run([sys.executable, "src/preprocess.py"])
-    
+
     elif args.command == 'train':
         print("🚀 Starting training...")
         subprocess.run([sys.executable, "src/train.py", "--epochs", "50"])
-    
+
     elif args.command == 'detect':
         print("🔍 Starting detection...")
-        subprocess.run([sys.executable, "src/inference.py", 
-                       "--source", args.source, 
+        subprocess.run([sys.executable, "src/inference.py",
+                       "--source", args.source,
                        "--model", args.model])
-    
+
     elif args.command == 'gui':
         print("🖥️  Launching GUI...")
         subprocess.run([sys.executable, "src/gui.py"])
-    
+
+    elif args.command == 'api':
+        print("🌐 Starting FastAPI Backend...")
+        print(f"   Host: {args.host}")
+        print(f"   Port: {args.port}")
+        print(f"   Docs: http://{args.host}:{args.port}/docs")
+        subprocess.run([sys.executable, "src/api.py",
+                       "--host", args.host,
+                       "--port", str(args.port),
+                       "--reload" if args.reload else ""])
+
+    elif args.command == 'ros2':
+        print("🤖 Launching ROS2 System...")
+        print("   Note: Make sure ROS2 is sourced")
+        print("   Run: source /opt/ros/humble/setup.bash")
+        subprocess.run(["ros2", "launch", "ros2_inventory", "inventory_system.launch.py"])
+
     elif args.command == 'all':
         print("🎯 Running full pipeline...")
         # Setup
@@ -49,8 +68,11 @@ def main():
         subprocess.run([sys.executable, "src/preprocess.py"])
         # Train (quick version)
         subprocess.run([sys.executable, "src/train.py", "--epochs", "10"])
-        # Launch GUI
-        subprocess.run([sys.executable, "src/gui.py"])
+        # Launch API
+        print("\n🌐 Starting API server...")
+        subprocess.run([sys.executable, "src/api.py",
+                       "--host", args.host,
+                       "--port", str(args.port)])
 
 if __name__ == "__main__":
     main()

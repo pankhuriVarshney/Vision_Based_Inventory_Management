@@ -32,11 +32,11 @@ export default function DashboardPage() {
   const [liveDetections, setLiveDetections] = useState<Detection[]>([])
   const [liveStats, setLiveStats] = useState<any>(null)
 
-  // Real-time data stream (uses mock by default)
-  // To connect to real backend, set useMock=false and provide wsUrl:
-  // { useMock: false, wsUrl: "ws://localhost:8000/ws" }
+  // Real-time data stream - CONNECTED TO REAL BACKEND
+  // Change useMock to false to use real WebSocket data
   const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
-    useMock: true,
+    useMock: false,  // ← Changed to false for real data
+    wsUrl: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/inventory',
   })
 
   // Generate density map matching grid size selection

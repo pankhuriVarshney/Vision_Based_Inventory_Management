@@ -49,11 +49,17 @@ def main():
         print(f"   Host: {args.host}")
         print(f"   Port: {args.port}")
         print(f"   Docs: http://{args.host}:{args.port}/docs")
-        subprocess.run([sys.executable, "src/api.py",
-                       "--host", args.host,
-                       "--port", str(args.port),
-                       "--reload" if args.reload else ""])
-
+        
+        cmd = [
+            sys.executable, "-m", "uvicorn",
+            "src.api:app",
+            "--host", args.host,
+            "--port", str(args.port)
+        ]
+        if args.reload:
+            cmd.append("--reload")
+        
+        subprocess.run(cmd)
     elif args.command == 'ros2':
         print("🤖 Launching ROS2 System...")
         print("   Note: Make sure ROS2 is sourced")

@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
-Detection Node for Inventory Management System
-Runs YOLOv8 inference on camera images
-
-Subscribes: /camera/image_raw (sensor_msgs/Image)
-Publishes: 
-  - /detections (ros2_inventory/msg/DetectionArray)
-  - /annotated_image (sensor_msgs/Image)
+Detection Node with Pan-Tilt Tracking Support
+Publishes detection centers for camera tracking
 """
 
 import rclpy
@@ -16,24 +11,23 @@ from cv_bridge import CvBridge
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import inference module
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
 
-from inference import InventoryDetector, Detection
-from ros2_inventory.msg import Detection as ROS2Detection
-from ros2_inventory.msg import DetectionArray
+from inference import InventoryDetector
+from ros2_inventory.msg import Detection as ROS2Detection, DetectionArray
+from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 import numpy as np
 import time
 
 
 class DetectionNode(Node):
-    """YOLO detection node"""
+    """YOLO detection node with tracking support"""
     
     def __init__(self):
         super().__init__('detection_node')
         
-        # Declare parameters
+        # Parameters
         self.declare_parameter('model_path', 'yolov8n.pt')
         self.declare_parameter('conf_threshold', 0.25)
         self.declare_parameter('iou_threshold', 0.45)
@@ -41,9 +35,10 @@ class DetectionNode(Node):
         self.declare_parameter('input_topic', 'camera/image_raw')
         self.declare_parameter('output_topic', 'detections')
         self.declare_parameter('annotated_topic', 'annotated_image')
-        self.declare_parameter('max_detections', 1000)
+        self.declare_parameter('center_topic', 'detection_center')
+        self.declare_parameter('enable_tracking', True)
+        self.declare_parameter('tracking_threshold', 0.7)
         
-        # Get parameters
         model_path = self.get_parameter('model_path').get_parameter_value().string_value
         conf_threshold = self.get_parameter('conf_threshold').get_parameter_value().double_value
         iou_threshold = self.get_parameter('iou_threshold').get_parameter_value().double_value
@@ -51,7 +46,9 @@ class DetectionNode(Node):
         input_topic = self.get_parameter('input_topic').get_parameter_value().string_value
         output_topic = self.get_parameter('output_topic').get_parameter_value().string_value
         annotated_topic = self.get_parameter('annotated_topic').get_parameter_value().string_value
-        max_detections = self.get_parameter('max_detections').get_parameter_value().integer_value
+        center_topic = self.get_parameter('center_topic').get_parameter_value().string_value
+        self.enable_tracking = self.get_parameter('enable_tracking').get_parameter_value().bool_value
+        self.tracking_threshold = self.get_parameter('tracking_threshold').get_parameter_value().double_value
         
         # Initialize detector
         self.get_logger().info(f'Loading YOLO model: {model_path}')
@@ -60,85 +57,88 @@ class DetectionNode(Node):
                 model_path=model_path,
                 conf_threshold=conf_threshold,
                 iou_threshold=iou_threshold,
-                max_detections=max_detections,
                 device=device
             )
-            self.get_logger().info(f'Model loaded successfully on {device}')
+            self.get_logger().info(f'Model loaded on {device}')
         except Exception as e:
             self.get_logger().error(f'Failed to load model: {str(e)}')
             raise
         
-        # Initialize CV bridge
         self.bridge = CvBridge()
         
-        # Create subscriptions
+        # QoS
         qos_profile = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=5
         )
         
-        self.subscription = self.create_subscription(
-            Image,
-            input_topic,
-            self.image_callback,
-            qos_profile
-        )
-        
-        # Create publishers
-        self.detection_publisher = self.create_publisher(
-            DetectionArray,
-            output_topic,
-            10
-        )
-        
-        self.annotated_publisher = self.create_publisher(
-            Image,
-            annotated_topic,
-            10
-        )
+        # Subscribers and Publishers
+        self.create_subscription(Image, input_topic, self.image_callback, qos_profile)
+        self.detection_pub = self.create_publisher(DetectionArray, output_topic, 10)
+        self.annotated_pub = self.create_publisher(Image, annotated_topic, 10)
+        self.center_pub = self.create_publisher(Point, center_topic, 10)
         
         # Statistics
         self.frame_count = 0
         self.total_inference_time = 0.0
-        self.get_logger().info(f'Detection node initialized. Subscribed to {input_topic}')
+        
+        self.get_logger().info('Detection node initialized')
     
     def image_callback(self, msg: Image):
-        """Process incoming image"""
         try:
-            # Convert ROS2 Image to OpenCV format
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
-            
-            # Convert RGB to BGR for YOLO
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             
-            # Run detection
             start_time = time.time()
             detections, annotated_frame = self.detector.detect(frame_bgr)
-            inference_time = (time.time() - start_time) * 1000  # ms
+            inference_time = (time.time() - start_time) * 1000
             
-            # Update statistics
             self.frame_count += 1
             self.total_inference_time += inference_time
             
+            # Calculate center of all detections for tracking
+            if self.enable_tracking and detections:
+                self.publish_tracking_center(detections, frame.shape[1], frame.shape[0])
+            
+            # Publish results
+            self.publish_detections(detections, inference_time, msg.header.stamp)
+            self.publish_annotated_image(annotated_frame, msg.header.stamp)
+            
+            # Log stats
             if self.frame_count % 30 == 0:
                 avg_time = self.total_inference_time / self.frame_count
                 self.get_logger().info(
-                    f'Processed {self.frame_count} frames, avg inference: {avg_time:.1f}ms '
-                    f'({1000/avg_time:.1f} FPS)'
+                    f'Processed {self.frame_count} frames, '
+                    f'avg inference: {avg_time:.1f}ms ({1000/avg_time:.1f} FPS)'
                 )
-            
-            # Publish detections
-            self.publish_detections(detections, inference_time, msg.header.stamp)
-            
-            # Publish annotated image
-            self.publish_annotated_image(annotated_frame, msg.header.stamp)
-        
+                
         except Exception as e:
             self.get_logger().error(f'Error processing image: {str(e)}')
     
-    def publish_detections(self, detections: list, inference_time: float, stamp):
-        """Publish detection results"""
+    def publish_tracking_center(self, detections, frame_width, frame_height):
+        """Calculate and publish center point for pan-tilt tracking"""
+        if not detections:
+            return
+        
+        # Use highest confidence detection or average of all
+        best_det = max(detections, key=lambda d: d.confidence)
+        
+        if best_det.confidence < self.tracking_threshold:
+            return
+        
+        # Get center in normalized coordinates (0-1)
+        center_x = best_det.center[0] / frame_width
+        center_y = best_det.center[1] / frame_height
+        
+        msg = Point()
+        msg.x = center_x
+        msg.y = center_y
+        msg.z = best_det.confidence  # Use z for confidence
+        
+        self.center_pub.publish(msg)
+    
+    def publish_detections(self, detections, inference_time, stamp):
         try:
             msg = DetectionArray()
             msg.stamp = stamp
@@ -156,50 +156,36 @@ class DetectionNode(Node):
                 ros_det.y2 = float(det.bbox[3])
                 ros_det.center_x = float(det.center[0])
                 ros_det.center_y = float(det.center[1])
-                
                 msg.detections.append(ros_det)
             
-            self.detection_publisher.publish(msg)
-        
+            self.detection_pub.publish(msg)
         except Exception as e:
             self.get_logger().error(f'Error publishing detections: {str(e)}')
     
-    def publish_annotated_image(self, frame: np.ndarray, stamp):
-        """Publish annotated image"""
+    def publish_annotated_image(self, frame, stamp):
         try:
-            # Convert BGR to RGB for ROS2
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Convert to ROS2 Image message
             msg = self.bridge.cv2_to_imgmsg(frame_rgb, encoding='rgb8')
             msg.header.stamp = stamp
             msg.header.frame_id = 'detection_frame'
-            
-            self.annotated_publisher.publish(msg)
-        
+            self.annotated_pub.publish(msg)
         except Exception as e:
-            self.get_logger().error(f'Error publishing annotated image: {str(e)}')
+            self.get_logger().error(f'Error publishing image: {str(e)}')
     
     def destroy_node(self):
-        """Cleanup"""
         self.get_logger().info('Shutting down detection node...')
         super().destroy_node()
 
 
 def main(args=None):
-    """Main entry point"""
     rclpy.init(args=args)
-    
+    node = DetectionNode()
     try:
-        node = DetectionNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        print(f'Error: {str(e)}')
     finally:
-        if 'node' in locals():
-            node.destroy_node()
+        node.destroy_node()
         rclpy.shutdown()
 
 

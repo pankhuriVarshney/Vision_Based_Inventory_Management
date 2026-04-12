@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Data Preprocessing for Retail Inventory Detection
-Supports: COCO-2017 (fast, auto-download), RPC (retail-specific), or SKU-110K (full only)
+Supports: COCO- 2017 (fast, auto-download), RPC (retail-specific), or SKU-110K (full only)
 """
 
 import os
@@ -217,7 +217,7 @@ download: |
             self._manual_download_coco()
             
         except Exception as e:
-            print(f"   ⚠️  Auto-download note: {e}")
+            print(f"    Auto-download note: {e}")
             print("   Attempting manual download...")
             self._manual_download_coco()
     
@@ -243,7 +243,7 @@ download: |
         if not train_dir.exists():
             if not train_zip.exists():
                 print("   Downloading train2017 images (~13GB)...")
-                print("   ⏱️  This will take several minutes...")
+                print("    This will take several minutes...")
                 self._download_with_progress(base_url + "train2017.zip", train_zip)
             
             print("   Extracting train images...")
@@ -268,7 +268,7 @@ download: |
         if val_dir.exists():
             shutil.move(str(val_dir), str(self.images_dir / "val"))
         
-        print("   ✅ COCO download complete!")
+        print("   COCO download complete!")
     
     def _download_with_progress(self, url, dest_path):
         """Download file with progress bar"""
@@ -461,7 +461,7 @@ names:
             thread.start()
             
             # Show spinner while downloading
-            spinner = ['⏳ Downloading...', '⏳ Downloading..', '⏳ Downloading.', '⏳ Downloading']
+            spinner = ['⏳ Downloading...', 'Downloading..', ' Downloading.', 'Downloading']
             i = 0
             while not download_complete:
                 print(f"\r   {spinner[i % len(spinner)]} (this may take 10+ minutes)", end='', flush=True)

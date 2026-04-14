@@ -24,17 +24,25 @@ export function InventoryDashboard({ inventory, detections }: InventoryDashboard
 
   // Fetch initial inventory stats
   useEffect(() => {
-    const fetchStats = async () => {
-      try {
-        const data = await apiClient.getInventoryCount();
-        setStats(data);
-        setLastUpdated(new Date());
-      } catch (error) {
-        console.error('Failed to fetch inventory stats:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
+   const fetchStats = async () => {
+  try {
+    const data = await apiClient.getInventoryCount();
+    setStats(data);
+    setLastUpdated(new Date());
+  } catch (error) {
+    console.error('Failed to fetch inventory stats:', error);
+    // Don't show error, just keep existing stats
+    setStats(prev => prev || {
+      avg_count: 0,
+      min_count: 0,
+      max_count: 0,
+      current_count: 0,
+      data_points: 0,
+    });
+  } finally {
+    setLoading(false);
+  }
+};
 
     fetchStats();
 

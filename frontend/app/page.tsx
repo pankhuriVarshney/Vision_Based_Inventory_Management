@@ -34,10 +34,11 @@ export default function DashboardPage() {
 
   // Real-time data stream - CONNECTED TO REAL BACKEND
   // Change useMock to false to use real WebSocket data
-  const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
-    useMock: false,  // ← Changed to false for real data
-    wsUrl: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/inventory',
-  })
+  // In page.tsx, around line 35-40, change:
+const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
+  useMock: false,  // Keep as false for real data
+  wsUrl: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/inventory',
+});
 
   // Generate density map matching grid size selection
   const densityMap = useMemo(() => {

@@ -3,11 +3,26 @@
  * Connects to FastAPI backend for real-time inventory monitoring
  */
 
-// API Configuration
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-const WS_BASE_URL = API_BASE_URL.replace('http', 'ws');
+// In Next.js client-side, NEXT_PUBLIC_* vars are replaced at build time
+// We need to ensure they have fallbacks
+const getApiUrl = () => {
+  // For client-side in Next.js, we need to use a different approach
+  if (typeof window !== 'undefined') {
+    // Try to get from window.__NEXT_DATA__ or use hardcoded Pi IP
+    const piIp = '192.168.1.4'; // Your Pi's IP - HARDCODED for now
+    return `http://${piIp}:8000`;
+  }
+  // Server-side fallback
+  return process.env.NEXT_PUBLIC_API_URL || 'http://192.168.1.4:8000';
+};
 
-// Types
+const API_BASE_URL = getApiUrl();
+const WS_BASE_URL = API_BASE_URL.replace('http', 'ws').replace('https', 'wss');
+
+console.log(`🔌 API Client connecting to: ${API_BASE_URL}`);
+console.log(`🔌 WebSocket connecting to: ${WS_BASE_URL}`);
+
+// Rest of your types remain the same...
 export interface Detection {
   bbox: number[];
   confidence: number;
@@ -81,6 +96,8 @@ export class InventoryAPIClient {
   constructor(baseUrl?: string) {
     this.baseUrl = baseUrl || API_BASE_URL;
     this.wsUrl = WS_BASE_URL;
+    console.log(`✅ API Client initialized with base URL: ${this.baseUrl}`);
+    console.log(`✅ WebSocket URL: ${this.wsUrl}`);
   }
 
   // ========================================================================
@@ -91,9 +108,14 @@ export class InventoryAPIClient {
    * Health check
    */
   async healthCheck(): Promise<{ status: string; detector_loaded: boolean }> {
-    const response = await fetch(`${this.baseUrl}/api/health`);
-    const data = await response.json();
-    return data.data;
+    try {
+      const response = await fetch(`${this.baseUrl}/api/health`);
+      const data = await response.json();
+      return data.data;
+    } catch (error) {
+      console.error('Health check failed:', error);
+      return { status: 'unreachable', detector_loaded: false };
+    }
   }
 
   /**
@@ -160,18 +182,50 @@ export class InventoryAPIClient {
    * Get current inventory count
    */
   async getInventoryCount(): Promise<InventoryStats> {
-    const response = await fetch(`${this.baseUrl}/api/inventory/count`);
-    const data = await response.json();
-    return data.data.current;
+    try {
+      const response = await fetch(`${this.baseUrl}/api/inventory/count`);
+      if (!response.ok) {
+        console.warn(`Inventory API returned ${response.status}, using fallback`);
+        return {
+          avg_count: 0,
+          min_count: 0,
+          max_count: 0,
+          current_count: 0,
+          data_points: 0,
+        };
+      }
+      const data = await response.json();
+      return data.data?.current || {
+        avg_count: 0,
+        min_count: 0,
+        max_count: 0,
+        current_count: 0,
+        data_points: 0,
+      };
+    } catch (error) {
+      console.error('Failed to fetch inventory count:', error);
+      return {
+        avg_count: 0,
+        min_count: 0,
+        max_count: 0,
+        current_count: 0,
+        data_points: 0,
+      };
+    }
   }
 
   /**
    * Get inventory history
    */
   async getInventoryHistory(limit: number = 100): Promise<InventoryHistory[]> {
-    const response = await fetch(`${this.baseUrl}/api/inventory/history?limit=${limit}`);
-    const data = await response.json();
-    return data.data.history;
+    try {
+      const response = await fetch(`${this.baseUrl}/api/inventory/history?limit=${limit}`);
+      const data = await response.json();
+      return data.data?.history || [];
+    } catch (error) {
+      console.error('Failed to fetch inventory history:', error);
+      return [];
+    }
   }
 
   /**
@@ -194,18 +248,34 @@ export class InventoryAPIClient {
    * Get model information
    */
   async getModelInfo(): Promise<ModelInfo> {
-    const response = await fetch(`${this.baseUrl}/api/model/info`);
-    const data = await response.json();
-    return data.data;
+    try {
+      const response = await fetch(`${this.baseUrl}/api/model/info`);
+      const data = await response.json();
+      return data.data;
+    } catch (error) {
+      console.error('Failed to fetch model info:', error);
+      return {
+        path: 'unknown',
+        device: 'unknown',
+        conf_threshold: 0.25,
+        iou_threshold: 0.45,
+        frame_count: 0,
+      };
+    }
   }
 
   /**
    * List available models
    */
   async listModels(): Promise<Array<{ name: string; path: string; size_mb: number }>> {
-    const response = await fetch(`${this.baseUrl}/api/model/list`);
-    const data = await response.json();
-    return data.data.models;
+    try {
+      const response = await fetch(`${this.baseUrl}/api/model/list`);
+      const data = await response.json();
+      return data.data?.models || [];
+    } catch (error) {
+      console.error('Failed to list models:', error);
+      return [];
+    }
   }
 
   /**
@@ -305,7 +375,7 @@ export class InventoryAPIClient {
     this.videoWebSocket = ws;
 
     ws.onopen = () => {
-      // Send source configuration
+      console.log('✅ Video WebSocket connected');
       ws.send(JSON.stringify({ source }));
     };
 
@@ -320,14 +390,15 @@ export class InventoryAPIClient {
     };
 
     ws.onerror = () => {
+      console.error('❌ Video WebSocket error');
       if (onError) onError('WebSocket connection error');
     };
 
     ws.onclose = () => {
+      console.log('Video WebSocket closed');
       if (onClose) onClose();
     };
 
-    // Return disconnect function
     return () => {
       ws.close();
       this.videoWebSocket = null;
@@ -346,10 +417,14 @@ export class InventoryAPIClient {
 
     this.inventoryWebSocket = ws;
 
+    ws.onopen = () => {
+      console.log('✅ Inventory WebSocket connected');
+    };
+
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.success) {
+        if (data.success && data.inventory) {
           onInventory(data.inventory);
         }
       } catch (error) {
@@ -359,14 +434,15 @@ export class InventoryAPIClient {
     };
 
     ws.onerror = () => {
+      console.error('❌ Inventory WebSocket error');
       if (onError) onError('WebSocket connection error');
     };
 
     ws.onclose = () => {
+      console.log('Inventory WebSocket closed');
       if (onClose) onClose();
     };
 
-    // Return disconnect function
     return () => {
       ws.close();
       this.inventoryWebSocket = null;
@@ -388,8 +464,8 @@ export class InventoryAPIClient {
   }
 }
 
-// Export singleton instance
-export const apiClient = new InventoryAPIClient();
+// Export singleton instance with Pi IP hardcoded
+export const apiClient = new InventoryAPIClient('http://192.168.1.4:8000');
 
 // Export default
 export default apiClient;

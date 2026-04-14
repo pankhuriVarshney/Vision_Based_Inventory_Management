@@ -1,730 +1,433 @@
-#!/usr/bin/env python3
-"""
-FastAPI Backend for Vision-Based Inventory Management System
-Provides REST API and WebSocket endpoints for:
-- Image/video detection
-- Real-time inventory monitoring
-- Model management
-- Data export
+# src/api.py - Updated with proper video streaming
 
-Usage:
-    python api.py --host 0.0.0.0 --port 8000
-    OR
-    uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
-"""
-
-import sys
-import os
-import time
-import asyncio
-import base64
-from pathlib import Path
-from typing import Dict, List, Optional, Any
-from contextlib import asynccontextmanager
-
-# FastAPI imports
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, WebSocket, WebSocketDisconnect, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from inference import InventoryDetector, Detection, InventoryCount
-from utils import (
-    encode_image_to_base64,
-    decode_base64_to_image,
-    load_image_from_file,
-    resize_frame,
-    FrameBuffer,
-    VideoStreamStats,
-    InventoryHistory,
-    success_response,
-    error_response,
-    validate_image_file,
-    list_available_models,
-    get_model_path
-)
-
+from typing import Optional, Dict, Any
 import cv2
 import numpy as np
+import base64
+import asyncio
 import json
+import time
+from datetime import datetime
+import threading
+from collections import deque
 
+from .inference import InventoryDetector
 
-# ============================================================================
-# Lifespan Manager
-# ============================================================================
+app = FastAPI(title="Vision-Based Inventory Management API", version="1.0.0")
 
-class AppState:
-    """Global application state"""
-    def __init__(self):
-        self.detector: Optional[InventoryDetector] = None
-        self.video_active = False
-        self.video_buffer = FrameBuffer(max_size=5)
-        self.stats = VideoStreamStats()
-        self.inventory_history = InventoryHistory(max_size=1000)
-        self.websocket_clients: List[WebSocket] = []
-        self.inventory_websocket_clients: List[WebSocket] = []
-
-
-app_state = AppState()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
-    # Startup
-    print("🚀 Starting Inventory Management API...")
-    
-    # Initialize detector with default model
-    model_path = "yolov8n.pt"
-    
-    # Check for trained model
-    trained_model = get_model_path("best.pt", "models")
-    if trained_model:
-        model_path = str(trained_model)
-        print(f"✓ Found trained model: {model_path}")
-    
-    app_state.detector = InventoryDetector(
-        model_path=model_path,
-        conf_threshold=0.25,
-        device='cpu'
-    )
-    
-    print(f"✅ API ready on http://0.0.0.0:8000")
-    print(f"📊 Model loaded: {model_path}")
-    
-    yield
-    
-    # Shutdown
-    print("\n🛑 Shutting down API...")
-    app_state.video_active = False
-    for client in app_state.websocket_clients:
-        await client.close()
-
-
-# ============================================================================
-# FastAPI App
-# ============================================================================
-
-app = FastAPI(
-    title="Vision-Based Inventory Management API",
-    description="REST API and WebSocket endpoints for real-time inventory detection and monitoring",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# CORS middleware (allow frontend connection)
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Global variables
+detector = None
+video_thread = None
+video_running = False
+video_clients: list[WebSocket] = []
+video_frame = None
+frame_lock = threading.Lock()
 
-# ============================================================================
-# Pydantic Models (Request/Response Schemas)
-# ============================================================================
+# Store last frame for WebSocket clients
+last_frame_data = None
+last_detections = []
+last_inventory = None
 
-class DetectionResponse(BaseModel):
-    """Single detection response"""
-    bbox: List[float]
-    confidence: float
-    class_id: int
-    class_name: str
-    center: List[float]
+# Video capture
+cap = None
+camera_source = None
 
+# Statistics
+stats = {
+    "fps": 0,
+    "frame_count": 0,
+    "last_fps_update": time.time(),
+    "fps_samples": deque(maxlen=30),
+    "total_inference_time": 0,
+    "avg_inference_time": 0,
+}
 
-class InventoryResponse(BaseModel):
-    """Inventory count response"""
-    total_objects: int
-    class_counts: Dict[str, int]
-    density_score: float
-    timestamp: float
+@app.on_event("startup")
+async def startup_event():
+    global detector
+    try:
+        detector = InventoryDetector(model_path="yolov8n.pt", device="cpu")
+        print("✅ Model loaded successfully")
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
+        detector = None
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    global video_running, cap
+    video_running = False
+    if cap:
+        cap.release()
 
-class DetectionResult(BaseModel):
-    """Full detection result"""
-    success: bool
-    detections: List[DetectionResponse]
-    inventory: InventoryResponse
-    metadata: Dict[str, Any]
-    message: Optional[str] = None
-
-
-class ModelInfo(BaseModel):
-    """Model information"""
-    path: str
-    device: str
-    conf_threshold: float
-    iou_threshold: float
-    frame_count: int
-
-
-class SwitchModelRequest(BaseModel):
-    """Request to switch model"""
-    model_path: str
-    conf_threshold: Optional[float] = 0.25
-
-
-# ============================================================================
+# ========================================================================
 # REST API Endpoints
-# ============================================================================
+# ========================================================================
 
 @app.get("/")
 async def root():
-    """API root - health check"""
-    return success_response(
-        data={
+    return {
+        "success": True,
+        "message": "API is running",
+        "data": {
             "name": "Vision-Based Inventory Management API",
             "version": "1.0.0",
             "status": "running"
         },
-        message="API is running"
-    )
-
+        "timestamp": time.time()
+    }
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint"""
-    return success_response(
-        data={
-            "status": "healthy",
-            "detector_loaded": app_state.detector is not None,
-            "video_active": app_state.video_active,
-            "active_clients": len(app_state.websocket_clients)
-        },
-        message="System healthy"
-    )
-
-
-@app.post("/api/detect/image", response_model=DetectionResult)
-async def detect_image(file: UploadFile = File(...)):
-    """
-    Detect objects in uploaded image
-    
-    Args:
-        file: Image file (jpg, png, etc.)
-    
-    Returns:
-        Detection results with bounding boxes and inventory count
-    """
-    if app_state.detector is None:
-        raise HTTPException(status_code=500, detail="Detector not initialized")
-    
-    # Validate file
-    if not file.content_type.startswith('image/'):
-        raise HTTPException(status_code=400, detail="File must be an image")
-    
-    try:
-        # Read image
-        contents = await file.read()
-        nparr = np.frombuffer(contents, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if frame is None:
-            raise HTTPException(status_code=400, detail="Could not decode image")
-        
-        # Run detection
-        result = app_state.detector.detect_image(frame)
-        
-        if 'error' in result:
-            raise HTTPException(status_code=500, detail=result['error'])
-        
-        # Add to inventory history
-        app_state.inventory_history.add_count(
-            result['inventory']['total_objects'],
-            result['inventory']['class_counts']
-        )
-        
-        return result
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/detect/base64", response_model=DetectionResult)
-async def detect_base64(request: Dict):
-    """
-    Detect objects from base64 encoded image
-    
-    Args:
-        request: {"image_base64": "<base64 string>"}
-    
-    Returns:
-        Detection results
-    """
-    if app_state.detector is None:
-        raise HTTPException(status_code=500, detail="Detector not initialized")
-    
-    image_base64 = request.get('image_base64')
-    if not image_base64:
-        raise HTTPException(status_code=400, detail="Missing image_base64 field")
-    
-    result = app_state.detector.detect_from_base64(image_base64)
-    
-    if 'error' in result:
-        raise HTTPException(status_code=500, detail=result['error'])
-    
-    # Add to inventory history
-    app_state.inventory_history.add_count(
-        result['inventory']['total_objects'],
-        result['inventory']['class_counts']
-    )
-    
-    return result
-
-
-@app.post("/api/detect/url")
-async def detect_url(request: Dict):
-    """
-    Detect objects from image URL
-    
-    Args:
-        request: {"url": "<image URL>"}
-    
-    Returns:
-        Detection results
-    """
-    if app_state.detector is None:
-        raise HTTPException(status_code=500, detail="Detector not initialized")
-    
-    url = request.get('url')
-    if not url:
-        raise HTTPException(status_code=400, detail="Missing url field")
-    
-    try:
-        # Download image from URL
-        import urllib.request
-        temp_path = "/tmp/temp_image.jpg"
-        urllib.request.urlretrieve(url, temp_path)
-        
-        result = app_state.detector.detect_image(temp_path)
-        
-        # Cleanup
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        
-        if 'error' in result:
-            raise HTTPException(status_code=500, detail=result['error'])
-        
-        return result
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    return {
+        "success": True,
+        "data": {
+            "status": "healthy" if detector else "no_model",
+            "detector_loaded": detector is not None,
+            "camera_active": video_running,
+            "websocket_clients": len(video_clients)
+        }
+    }
 
 @app.get("/api/inventory/count")
 async def get_inventory_count():
-    """
-    Get current inventory count
-    
-    Returns:
-        Current inventory statistics
-    """
-    stats = app_state.inventory_history.get_statistics()
-    
-    return success_response(
-        data={
-            'current': stats,
-            'last_updated': time.time()
-        },
-        message="Inventory count retrieved"
-    )
+    global last_inventory
+    if last_inventory:
+        return {
+            "success": True,
+            "data": {
+                "current": {
+                    "avg_count": last_inventory.get("total_objects", 0),
+                    "min_count": 0,
+                    "max_count": 100,
+                    "current_count": last_inventory.get("total_objects", 0),
+                    "data_points": stats["frame_count"]
+                }
+            }
+        }
+    return {
+        "success": True,
+        "data": {
+            "current": {
+                "avg_count": 0,
+                "min_count": 0,
+                "max_count": 100,
+                "current_count": 0,
+                "data_points": 0
+            }
+        }
+    }
 
-
-@app.get("/api/inventory/history")
-async def get_inventory_history(
-    limit: int = Query(default=100, description="Number of history entries to return")
-):
-    """
-    Get inventory count history
+@app.post("/api/video/start")
+async def start_video(source: str = "0"):
+    global cap, video_running, video_thread, camera_source
     
-    Args:
-        limit: Maximum number of entries to return
+    if video_running:
+        return {"active": True, "source": camera_source}
     
-    Returns:
-        List of historical inventory counts
-    """
-    history = app_state.inventory_history.get_history(limit=limit)
+    camera_source = source
     
-    return success_response(
-        data={
-            'history': history,
-            'count': len(history)
-        },
-        message="Inventory history retrieved"
-    )
-
-
-@app.post("/api/inventory/export")
-async def export_inventory(
-    format: str = Query(default="json", description="Export format: json or csv"),
-    output_path: Optional[str] = Query(default=None, description="Output file path")
-):
-    """
-    Export inventory history to file
-    
-    Args:
-        format: Export format (json or csv)
-        output_path: Optional output path
-    
-    Returns:
-        Exported data or file path
-    """
-    if format.lower() == 'json':
-        history = app_state.inventory_history.get_history(limit=0)  # Get all
-        
-        if output_path:
-            app_state.inventory_history.export_to_json(output_path)
-            return success_response(
-                data={'file_path': output_path},
-                message=f"Exported to {output_path}"
-            )
-        else:
-            return success_response(
-                data={'history': history},
-                message="Inventory history exported"
-            )
-    
-    elif format.lower() == 'csv':
-        if not output_path:
-            output_path = f"inventory_export_{int(time.time())}.csv"
-        
-        success = app_state.inventory_history.export_to_csv(output_path)
-        
-        if success:
-            return success_response(
-                data={'file_path': output_path},
-                message=f"Exported to {output_path}"
-            )
-        else:
-            raise HTTPException(status_code=500, detail="Failed to export CSV")
-    
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
-
-
-@app.get("/api/model/info")
-async def get_model_info():
-    """
-    Get current model information
-    
-    Returns:
-        Model details and configuration
-    """
-    if app_state.detector is None:
-        raise HTTPException(status_code=500, detail="Detector not initialized")
-    
-    info = app_state.detector.get_model_info()
-    
-    return success_response(
-        data=info,
-        message="Model info retrieved"
-    )
-
-
-@app.get("/api/model/list")
-async def list_models():
-    """
-    List all available models
-    
-    Returns:
-        List of model files
-    """
-    models = list_available_models("models")
-    
-    return success_response(
-        data={'models': models, 'count': len(models)},
-        message="Models listed successfully"
-    )
-
-
-@app.post("/api/model/switch")
-async def switch_model(request: SwitchModelRequest):
-    """
-    Switch to a different model
-    
-    Args:
-        request: Model path and configuration
-    
-    Returns:
-        New model info
-    """
+    # Open camera
     try:
-        # Validate model path
-        model_path = get_model_path(request.model_path, "models")
-        if not model_path:
-            raise HTTPException(status_code=404, detail=f"Model not found: {request.model_path}")
+        if source.isdigit():
+            cap = cv2.VideoCapture(int(source))
+        else:
+            cap = cv2.VideoCapture(source)
         
-        # Load new model
-        print(f"🔄 Switching to model: {model_path}")
-        app_state.detector = InventoryDetector(
-            model_path=str(model_path),
-            conf_threshold=request.conf_threshold,
-            device='cpu'
-        )
+        if not cap.isOpened():
+            raise HTTPException(status_code=400, detail="Cannot open camera")
         
-        return success_response(
-            data=app_state.detector.get_model_info(),
-            message=f"Switched to model: {model_path.name}"
-        )
-    
-    except HTTPException:
-        raise
+        # Set resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        
+        video_running = True
+        video_thread = threading.Thread(target=process_video_stream, daemon=True)
+        video_thread.start()
+        
+        return {"active": True, "source": source}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/video/stop")
+async def stop_video():
+    global video_running, cap
+    video_running = False
+    if cap:
+        cap.release()
+        cap = None
+    return {"active": False}
 
-@app.post("/api/inventory/clear")
-async def clear_inventory_history():
-    """
-    Clear inventory history
+@app.get("/api/video/status")
+async def video_status():
+    return {
+        "success": True,
+        "data": {
+            "active": video_running,
+            "clients": len(video_clients),
+            "stats": {
+                "avg_fps": stats["fps"],
+                "avg_latency_ms": stats["avg_inference_time"]
+            }
+        }
+    }
+
+# ========================================================================
+# Video Processing Function
+# ========================================================================
+
+def process_video_stream():
+    global stats, last_frame_data, last_detections, last_inventory, video_frame
     
-    Returns:
-        Confirmation
-    """
-    app_state.inventory_history.clear()
+    frame_count = 0
+    fps_update_counter = 0
+    last_time = time.time()
     
-    return success_response(
-        data={},
-        message="Inventory history cleared"
-    )
+    while video_running and cap and cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to read frame")
+            time.sleep(0.01)
+            continue
+        
+        frame_count += 1
+        fps_update_counter += 1
+        
+        # Update FPS every 30 frames
+        if fps_update_counter >= 30:
+            current_time = time.time()
+            elapsed = current_time - last_time
+            if elapsed > 0:
+                stats["fps"] = fps_update_counter / elapsed
+                stats["fps_samples"].append(stats["fps"])
+                stats["fps"] = sum(stats["fps_samples"]) / len(stats["fps_samples"])
+            last_time = current_time
+            fps_update_counter = 0
+        
+        # Run detection
+        inference_start = time.time()
+        if detector:
+            try:
+                detections, annotated_frame = detector.detect(frame)
+                inference_time = (time.time() - inference_start) * 1000
+                stats["total_inference_time"] += inference_time
+                stats["avg_inference_time"] = stats["total_inference_time"] / frame_count if frame_count > 0 else 0
+                
+                # Update inventory
+                total_objects = len(detections)
+                class_counts = {}
+                for det in detections:
+                    class_counts[det.class_name] = class_counts.get(det.class_name, 0) + 1
+                
+                density_score = total_objects / 9.0  # Simple density calculation
+                
+                last_inventory = {
+                    "total_objects": total_objects,
+                    "class_counts": class_counts,
+                    "density_score": min(density_score, 10.0),
+                    "timestamp": time.time()
+                }
+                
+                last_detections = [
+                    {
+                        "bbox": det.bbox,
+                        "confidence": det.confidence,
+                        "class_id": det.class_id,
+                        "class_name": det.class_name,
+                        "center": det.center
+                    }
+                    for det in detections
+                ]
+                
+                # Encode frame to base64
+                _, buffer = cv2.imencode('.jpg', annotated_frame)
+                frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                
+                last_frame_data = {
+                    "success": True,
+                    "frame": frame_base64,
+                    "detections": last_detections,
+                    "inventory": last_inventory,
+                    "stats": {
+                        "fps": stats["fps"],
+                        "latency_ms": inference_time,
+                        "frame_count": frame_count
+                    }
+                }
+                
+                # Broadcast to all WebSocket clients
+                asyncio.run(broadcast_to_clients(last_frame_data))
+                
+            except Exception as e:
+                print(f"Detection error: {e}")
+        else:
+            # No detector, just send raw frame
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame_base64 = base64.b64encode(buffer).decode('utf-8')
+            last_frame_data = {
+                "success": True,
+                "frame": frame_base64,
+                "detections": [],
+                "inventory": {"total_objects": 0, "class_counts": {}, "density_score": 0},
+                "stats": {
+                    "fps": stats["fps"],
+                    "latency_ms": 0,
+                    "frame_count": frame_count
+                }
+            }
+            asyncio.run(broadcast_to_clients(last_frame_data))
+        
+        # Small delay to control frame rate
+        time.sleep(0.01)
+    
+    print("Video processing stopped")
 
+async def broadcast_to_clients(data):
+    """Broadcast frame to all connected WebSocket clients"""
+    global video_clients
+    disconnected = []
+    
+    for client in video_clients:
+        try:
+            await client.send_json(data)
+        except:
+            disconnected.append(client)
+    
+    # Remove disconnected clients
+    for client in disconnected:
+        if client in video_clients:
+            video_clients.remove(client)
 
-# ============================================================================
-# WebSocket Endpoints (Real-time Streaming)
-# ============================================================================
+# ========================================================================
+# WebSocket Endpoints
+# ========================================================================
 
 @app.websocket("/ws/video")
-async def websocket_video(websocket: WebSocket):
-    """
-    WebSocket for real-time video streaming with detections
+async def video_websocket(websocket: WebSocket):
+    global video_clients
     
-    Client sends: Camera source (0 for webcam, or file path)
-    Server sends: Annotated frames as base64 + detection data
-    """
     await websocket.accept()
-    app_state.websocket_clients.append(websocket)
-    
-    print(f"📹 Video WebSocket connected. Total clients: {len(app_state.websocket_clients)}")
+    video_clients.append(websocket)
+    print(f"📹 Video WebSocket connected. Total clients: {len(video_clients)}")
     
     try:
-        while app_state.video_active:
-            # Receive configuration from client
-            try:
-                data = await asyncio.wait_for(websocket.receive_json(), timeout=1.0)
-                source = data.get('source', '0')
-                
-                # Start video processing
-                app_state.video_active = True
-                
-                # Open video source
-                cap = cv2.VideoCapture(int(source) if source.isdigit() else source)
-                
-                if not cap.isOpened():
-                    await websocket.send_json({'error': f'Cannot open source: {source}'})
-                    break
-                
-                while app_state.video_active:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    
-                    # Run detection
-                    start_time = time.time()
-                    detections, annotated = app_state.detector.detect(frame)
-                    inventory = app_state.detector.count_inventory(detections, frame.shape)
-                    inference_time = time.time() - start_time
-                    
-                    # Update stats
-                    stats = app_state.stats.update(inference_time)
-                    
-                    # Add to history
-                    app_state.inventory_history.add_count(
-                        inventory.total_objects,
-                        inventory.class_counts
-                    )
-                    
-                    # Encode frame
-                    frame_base64 = encode_image_to_base64(annotated)
-                    
-                    # Send to client
-                    await websocket.send_json({
-                        'success': True,
-                        'frame': frame_base64,
-                        'detections': [det.to_dict() for det in detections],
-                        'inventory': inventory.to_dict(),
-                        'stats': {
-                            'fps': stats['avg_fps'],
-                            'latency_ms': stats['avg_latency_ms'],
-                            'frame_count': stats['frame_count']
-                        }
-                    })
-                    
-                    # Small delay to control FPS
-                    await asyncio.sleep(0.033)  # ~30 FPS
-                
-                cap.release()
-                
-            except asyncio.TimeoutError:
-                # Check if still active
-                if not app_state.video_active:
-                    break
-                continue
+        # Send initial frame if available
+        if last_frame_data:
+            await websocket.send_json(last_frame_data)
         
+        # Keep connection alive and listen for messages
+        while True:
+            # Receive messages (like source configuration)
+            data = await websocket.receive_text()
+            try:
+                msg = json.loads(data)
+                if "source" in msg:
+                    print(f"Client requested source: {msg['source']}")
+                    # Start video if not already running
+                    if not video_running:
+                        await start_video(msg['source'])
+            except:
+                pass
+            
     except WebSocketDisconnect:
-        print("📹 Video WebSocket disconnected")
-    finally:
-        app_state.websocket_clients.remove(websocket)
-        print(f"📹 Client removed. Remaining: {len(app_state.websocket_clients)}")
-
+        video_clients.remove(websocket)
+        print(f"📹 Client removed. Remaining: {len(video_clients)}")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        if websocket in video_clients:
+            video_clients.remove(websocket)
 
 @app.websocket("/ws/inventory")
-async def websocket_inventory(websocket: WebSocket):
-    """
-    WebSocket for real-time inventory updates
-    
-    Server sends: Inventory count updates
-    """
+async def inventory_websocket(websocket: WebSocket):
     await websocket.accept()
-    app_state.inventory_websocket_clients.append(websocket)
-    
-    print(f"📊 Inventory WebSocket connected. Total clients: {len(app_state.inventory_websocket_clients)}")
+    print("📊 Inventory WebSocket connected")
     
     try:
         while True:
             # Send inventory updates every second
-            stats = app_state.inventory_history.get_statistics()
-            
-            await websocket.send_json({
-                'success': True,
-                'inventory': stats,
-                'timestamp': time.time()
-            })
-            
-            await asyncio.sleep(1.0)
-    
+            if last_inventory:
+                await websocket.send_json({
+                    "success": True,
+                    "inventory": last_inventory,
+                    "timestamp": time.time()
+                })
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
-        print("📊 Inventory WebSocket disconnected")
-    finally:
-        app_state.inventory_websocket_clients.remove(websocket)
+        print("Inventory WebSocket disconnected")
+    except Exception as e:
+        print(f"Inventory WebSocket error: {e}")
 
+# ========================================================================
+# Image Detection Endpoints
+# ========================================================================
 
-# ============================================================================
-# Video Control Endpoints
-# ============================================================================
-
-@app.post("/api/video/start")
-async def start_video(source: str = Query(default="0")):
-    """
-    Start video processing
+@app.post("/api/detect/image")
+async def detect_image(file: UploadFile = File(...)):
+    if not detector:
+        raise HTTPException(status_code=503, detail="Detector not loaded")
     
-    Args:
-        source: Video source (camera index or file path)
+    # Read image
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     
-    Returns:
-        Status
-    """
-    if app_state.video_active:
-        return success_response(
-            data={'active': True, 'source': source},
-            message="Video already active"
-        )
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Invalid image")
     
-    app_state.video_active = True
+    # Run detection
+    detections, annotated_frame = detector.detect(frame)
     
-    return success_response(
-        data={'active': True, 'source': source},
-        message=f"Video started with source: {source}"
-    )
-
-
-@app.post("/api/video/stop")
-async def stop_video():
-    """
-    Stop video processing
+    # Encode result
+    _, buffer = cv2.imencode('.jpg', annotated_frame)
+    annotated_base64 = base64.b64encode(buffer).decode('utf-8')
     
-    Returns:
-        Status
-    """
-    app_state.video_active = False
+    # Prepare response
+    detections_list = [
+        {
+            "bbox": det.bbox,
+            "confidence": det.confidence,
+            "class_id": det.class_id,
+            "class_name": det.class_name,
+            "center": det.center
+        }
+        for det in detections
+    ]
     
-    return success_response(
-        data={'active': False},
-        message="Video stopped"
-    )
-
-
-@app.get("/api/video/status")
-async def video_status():
-    """
-    Get video processing status
+    total_objects = len(detections)
+    class_counts = {}
+    for det in detections:
+        class_counts[det.class_name] = class_counts.get(det.class_name, 0) + 1
     
-    Returns:
-        Current status
-    """
-    stats = app_state.stats.get_stats()
-    
-    return success_response(
-        data={
-            'active': app_state.video_active,
-            'clients': len(app_state.websocket_clients),
-            'stats': stats
+    return {
+        "success": True,
+        "detections": detections_list,
+        "inventory": {
+            "total_objects": total_objects,
+            "class_counts": class_counts,
+            "density_score": total_objects / 9.0,
+            "timestamp": time.time()
         },
-        message="Video status retrieved"
-    )
-
-
-# ============================================================================
-# Main Entry Point
-# ============================================================================
-
-def main():
-    """Run API server"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Inventory Management API')
-    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=8000, help='Port to bind to')
-    parser.add_argument('--reload', action='store_true', help='Enable auto-reload')
-    
-    args = parser.parse_args()
-    
-    print(f"""
-╔═══════════════════════════════════════════════════════════╗
-║   Vision-Based Inventory Management API                   ║
-╠═══════════════════════════════════════════════════════════╣
-║  Endpoints:                                               ║
-║  • GET  /                    - Health check               ║
-║  • GET  /api/health          - System health              ║
-║  • POST /api/detect/image    - Detect from image file     ║
-║  • POST /api/detect/base64   - Detect from base64         ║
-║  • POST /api/detect/url      - Detect from URL            ║
-║  • GET  /api/inventory/count - Current inventory          ║
-║  • GET  /api/inventory/history - Inventory history        ║
-║  • POST /api/inventory/export - Export data               ║
-║  • GET  /api/model/info      - Model information          ║
-║  • GET  /api/model/list      - List models                ║
-║  • POST /api/model/switch    - Switch model               ║
-║  • WS   /ws/video            - Real-time video stream     ║
-║  • WS   /ws/inventory        - Real-time inventory        ║
-╚═══════════════════════════════════════════════════════════╝
-    """)
-    
-    import uvicorn
-    uvicorn.run(
-        "api:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        log_level="info"
-    )
-
+        "metadata": {
+            "image_shape": [frame.shape[0], frame.shape[1]],
+            "inference_time_ms": 0,
+            "fps": 0,
+            "model_info": {"name": "yolov8n.pt", "device": "cpu"}
+        },
+        "annotated_image_base64": annotated_base64
+    }
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -14,8 +14,8 @@ import { useInventoryStream } from "@/hooks/use-inventory-stream"
 import { generateDensityMap, generateMockLogs } from "@/lib/mock-data"
 import type { GridSize, ModelType } from "@/lib/types"
 
-// New API-connected components
-import { VideoStream } from "@/components/video-stream"
+// ROS Stream Component (import this - you need to create this file)
+import { ROSVideoStream } from "@/components/ROSVideoStream"
 import { InventoryDashboard } from "@/components/inventory-dashboard"
 import { DetectionsTable } from "@/components/detections-table"
 import { Detection } from "@/lib/api-client"
@@ -32,18 +32,19 @@ export default function DashboardPage() {
   const [liveDetections, setLiveDetections] = useState<Detection[]>([])
   const [liveStats, setLiveStats] = useState<any>(null)
 
-  // Real-time data stream - CONNECTED TO REAL BACKEND
-  // Change useMock to false to use real WebSocket data
-  // In page.tsx, around line 35-40, change:
-const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
-  useMock: false,  // Keep as false for real data
-  wsUrl: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/inventory',
-});
+  // Real-time data stream from backend API (inventory only)
+  const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
+    useMock: false,
+    wsUrl: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/inventory',
+  })
+
+  // Get Pi IP from environment or use default
+  const piIp = process.env.NEXT_PUBLIC_PI_IP || '192.168.1.4'
+  const rosStreamPort = parseInt(process.env.NEXT_PUBLIC_ROS_STREAM_PORT || '8080')
 
   // Generate density map matching grid size selection
   const densityMap = useMemo(() => {
     const [rows, cols] = gridSize.split("x").map(Number)
-    // Use frame density map if it matches, otherwise generate
     if (
       currentFrame.density_map.length === rows &&
       currentFrame.density_map[0]?.length === cols
@@ -83,13 +84,11 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
 
               {/* Main Content: Video + Side Panel */}
               <div className="grid gap-4 lg:grid-cols-5 lg:gap-6">
-                {/* Video Feed - takes 3/5 */}
+                {/* Video Feed - Using ROS Stream */}
                 <div className="lg:col-span-3">
-                  <VideoFeed
-                    detections={currentFrame.detections}
-                    fps={currentFrame.fps || 0}
-                    connected={connected}
-                    confidenceThreshold={confidenceThreshold}
+                  <ROSVideoStream
+                    piIp={piIp}
+                    port={rosStreamPort}
                   />
                 </div>
 
@@ -154,35 +153,40 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
 
           {activeView === "live" && (
             <div className="flex flex-col gap-4 lg:gap-6">
-              {/* Live API Stream View - Real-time from backend */}
+              {/* Live ROS Stream View */}
               <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
-                {/* Live Video Stream */}
-                <VideoStream
-                  source="0"
-                  onDetectionUpdate={setLiveDetections}
-                  onInventoryUpdate={setLiveInventory}
-                  onStatsUpdate={setLiveStats}
+                {/* Live Video Stream from ROS */}
+                <ROSVideoStream
+                  piIp={piIp}
+                  port={rosStreamPort}
                 />
 
-                {/* Live Inventory */}
+                {/* Live Inventory from API */}
                 <InventoryDashboard
-                  inventory={liveInventory}
-                  detections={liveDetections}
+                  inventory={currentFrame.inventory}
+                  detections={currentFrame.detections}
                 />
               </div>
 
               {/* Detections Table */}
               <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
-                <DetectionsTable detections={liveDetections} maxDisplay={20} />
+                <DetectionsTable 
+                  detections={currentFrame.detections.map(d => ({
+                    bbox: d.bbox,
+                    confidence: d.confidence,
+                    class_id: d.class_id,
+                    class_name: d.class_name,
+                    center: d.center
+                  }))} 
+                  maxDisplay={20} 
+                />
                 
                 {/* System Stats */}
-                {liveStats && (
-                  <SystemInfo
-                    connected={true}
-                    model={model}
-                    framesProcessed={liveStats.frameCount || 0}
-                  />
-                )}
+                <SystemInfo
+                  connected={connected}
+                  model={model}
+                  framesProcessed={framesProcessed}
+                />
               </div>
             </div>
           )}
@@ -190,32 +194,12 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
           {activeView === "cameras" && (
             <div className="flex flex-col gap-4 lg:gap-6">
               <div className="grid gap-4 lg:grid-cols-2">
-                <VideoFeed
-                  detections={currentFrame.detections}
-                  fps={currentFrame.fps || 0}
-                  connected={connected}
-                  confidenceThreshold={confidenceThreshold}
-                />
-                <VideoFeed
-                  detections={[]}
-                  fps={0}
-                  connected={false}
-                  confidenceThreshold={confidenceThreshold}
-                />
+                <ROSVideoStream piIp={piIp} port={rosStreamPort} />
+                <ROSVideoStream piIp={piIp} port={rosStreamPort} />
               </div>
               <div className="grid gap-4 lg:grid-cols-2">
-                <VideoFeed
-                  detections={[]}
-                  fps={0}
-                  connected={false}
-                  confidenceThreshold={confidenceThreshold}
-                />
-                <VideoFeed
-                  detections={[]}
-                  fps={0}
-                  connected={false}
-                  confidenceThreshold={confidenceThreshold}
-                />
+                <ROSVideoStream piIp={piIp} port={rosStreamPort} />
+                <ROSVideoStream piIp={piIp} port={rosStreamPort} />
               </div>
             </div>
           )}
@@ -237,6 +221,16 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
                   model={model}
                   framesProcessed={framesProcessed}
                 />
+                
+                {/* ROS Stream Info Card */}
+                <div className="rounded-lg border border-border bg-card p-4">
+                  <h3 className="text-sm font-medium mb-2">📹 ROS Stream Configuration</h3>
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>Stream URL: <code className="text-primary">http://{piIp}:{rosStreamPort}/stream.mjpg</code></p>
+                    <p>Status: {connected ? '🟢 Connected' : '🔴 Disconnected'}</p>
+                    <p>Frames: {framesProcessed}</p>
+                  </div>
+                </div>
               </div>
             </div>
           )}

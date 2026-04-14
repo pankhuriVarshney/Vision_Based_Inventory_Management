@@ -161,7 +161,20 @@ async def export_inventory(format: str = "json"):
                 "history": detection_history
             }
         }
-
+@app.get("/api/stream/frame")
+async def get_latest_frame():
+    """Get the latest frame from ROS bridge"""
+    import requests
+    try:
+        # Fetch from local bridge
+        response = requests.get('http://localhost:8080/stream.mjpg', timeout=0.5)
+        return {
+            "success": True,
+            "frame": None,  # You'd need to implement proper frame capture
+            "timestamp": time.time()
+        }
+    except:
+        return {"success": False, "frame": None}
 # ========================================================================
 # Helper Functions
 # ========================================================================

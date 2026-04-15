@@ -374,51 +374,51 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-@app.websocket("/ws/inventory")
-async def websocket_inventory(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        last_count = -1
-        last_status = ""
+# @app.websocket("/ws/inventory")
+# async def websocket_inventory(websocket: WebSocket):
+#     await manager.connect(websocket)
+#     try:
+#         last_count = -1
+#         last_status = ""
         
-        # Send initial data immediately
-        initial_data = {
-            "total_objects": inventory_state["current_count"],
-            "density_score": inventory_state["density_score"],
-            "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
-            "status": inventory_state["status"],
-            "class_counts": inventory_state["class_counts"],
-            "timestamp": time.time()
-        }
-        await manager.send_personal_message(initial_data, websocket)
+#         # Send initial data immediately
+#         initial_data = {
+#             "total_objects": inventory_state["current_count"],
+#             "density_score": inventory_state["density_score"],
+#             "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
+#             "status": inventory_state["status"],
+#             "class_counts": inventory_state["class_counts"],
+#             "timestamp": time.time()
+#         }
+#         await manager.send_personal_message(initial_data, websocket)
         
-        # Only send updates when data changes
-        while True:
-            current_count = inventory_state["current_count"]
-            current_status = inventory_state["status"]
+#         # Only send updates when data changes
+#         while True:
+#             current_count = inventory_state["current_count"]
+#             current_status = inventory_state["status"]
             
-            # Only send if data changed
-            if current_count != last_count or current_status != last_status:
-                data = {
-                    "total_objects": current_count,
-                    "density_score": inventory_state["density_score"],
-                    "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
-                    "status": current_status,
-                    "class_counts": inventory_state["class_counts"],
-                    "timestamp": time.time()
-                }
-                await manager.send_personal_message(data, websocket)
-                last_count = current_count
-                last_status = current_status
+#             # Only send if data changed
+#             if current_count != last_count or current_status != last_status:
+#                 data = {
+#                     "total_objects": current_count,
+#                     "density_score": inventory_state["density_score"],
+#                     "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
+#                     "status": current_status,
+#                     "class_counts": inventory_state["class_counts"],
+#                     "timestamp": time.time()
+#                 }
+#                 await manager.send_personal_message(data, websocket)
+#                 last_count = current_count
+#                 last_status = current_status
             
-            # Wait 2 seconds before checking again
-            await asyncio.sleep(2)
+#             # Wait 2 seconds before checking again
+#             await asyncio.sleep(2)
             
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
+#     except WebSocketDisconnect:
+#         manager.disconnect(websocket)
+#     except Exception as e:
+#         print(f"WebSocket error: {e}")
+#         manager.disconnect(websocket)
 
 if __name__ == "__main__":
     import uvicorn

@@ -33,10 +33,11 @@ export default function DashboardPage() {
   const [liveStats, setLiveStats] = useState<any>(null)
 
   // Real-time data stream from backend API (inventory only)
-  const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
-    useMock: false,
-    wsUrl: process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/ws/inventory',
-  })
+  // In page.tsx, change the useInventoryStream hook call:
+const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
+  useMock: false,  // Make sure this is false
+  wsUrl: `ws://${process.env.NEXT_PUBLIC_PI_IP || '192.168.1.4'}:8000/ws/inventory`,
+});
 
   // Get Pi IP from environment or use default
   const piIp = process.env.NEXT_PUBLIC_PI_IP || '192.168.1.4'

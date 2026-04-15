@@ -10,12 +10,23 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 from collections import defaultdict, deque
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Union
 import time
 from pathlib import Path
 import base64
-import io
+import json
+
+# Load class names - FIXED: Move this outside the class
+CLASS_NAMES_PATH = Path(__file__).parent.parent / "models/class_names.json"
+if CLASS_NAMES_PATH.exists():
+    with open(CLASS_NAMES_PATH, 'r') as f:
+        CLASS_NAMES = json.load(f)
+        CLASS_NAMES = {int(k): v for k, v in CLASS_NAMES.items()}
+    print(f"✅ Loaded {len(CLASS_NAMES)} class names from {CLASS_NAMES_PATH}")
+else:
+    CLASS_NAMES = {0: 'product'}
+    print(f"⚠️ Class names not found, using default: {CLASS_NAMES}")
 
 @dataclass
 class Detection:
@@ -95,11 +106,11 @@ class ShelfAnalyzer:
             density_map[grid_y, grid_x] += 1
             
         return {
-            'density_map': density_map,
+            'density_map': density_map.tolist(),
             'max_density_cell': np.unravel_index(np.argmax(density_map), density_map.shape),
             'avg_density': len(detections) / (grid_h * grid_w),
             'total_area': h * w,
-            'coverage_ratio': sum([((d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1])) for d in detections]) / (h * w)
+            'coverage_ratio': sum([((d.bbox[2]-d.bbox[0]) * (d.bbox[3]-d.bbox[1])) for d in detections]) / (h * w) if detections else 0
         }
 
 class InventoryDetector:
@@ -171,18 +182,18 @@ class InventoryDetector:
             confs = results.boxes.conf.cpu().numpy()
             classes = results.boxes.cls.cpu().numpy().astype(int)
 
-            # Get class names (SKU-110K is single class)
-            names = results.names if hasattr(results, 'names') else {0: 'product'}
-
             for i, (box, conf, cls) in enumerate(zip(boxes, confs, classes)):
                 x1, y1, x2, y2 = box
                 center = ((x1 + x2) / 2, (y1 + y2) / 2)
+
+                # FIXED: Use loaded CLASS_NAMES instead of results.names
+                class_name = CLASS_NAMES.get(int(cls), f'class_{int(cls)}')
 
                 det = Detection(
                     bbox=box,
                     confidence=float(conf),
                     class_id=int(cls),
-                    class_name=names.get(int(cls), 'product'),
+                    class_name=class_name,
                     center=center
                 )
                 detections.append(det)
@@ -192,7 +203,7 @@ class InventoryDetector:
                 cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
 
                 # Draw label
-                label = f"{det.class_name}: {conf:.2f}"
+                label = f"{class_name}: {conf:.2f}"
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
                 cv2.rectangle(annotated_frame, (int(x1), int(y1)-20), (int(x1)+tw, int(y1)), color, -1)
                 cv2.putText(annotated_frame, label, (int(x1), int(y1)-5),
@@ -290,63 +301,6 @@ class InventoryDetector:
             'iou_threshold': self.model_info['iou_threshold'],
             'frame_count': self.frame_count
         }
-        
-    def detect(self, frame: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
-        """
-        Run detection on a single frame
-        
-        Returns:
-            detections: List of Detection objects
-            annotated_frame: Frame with visualizations
-        """
-        # Run inference
-        results = self.model(
-            frame,
-            conf=self.conf_threshold,
-            iou=self.iou_threshold,
-            max_det=self.max_detections,
-            verbose=False,
-            device=self.device
-        )[0]
-        
-        detections = []
-        annotated_frame = frame.copy()
-        
-        # Process detections
-        if results.boxes is not None:
-            boxes = results.boxes.xyxy.cpu().numpy()
-            confs = results.boxes.conf.cpu().numpy()
-            classes = results.boxes.cls.cpu().numpy().astype(int)
-            
-            # Get class names (SKU-110K is single class)
-            names = results.names if hasattr(results, 'names') else {0: 'product'}
-            
-            for i, (box, conf, cls) in enumerate(zip(boxes, confs, classes)):
-                x1, y1, x2, y2 = box
-                center = ((x1 + x2) / 2, (y1 + y2) / 2)
-                
-                det = Detection(
-                    bbox=box,
-                    confidence=float(conf),
-                    class_id=int(cls),
-                    class_name=names.get(int(cls), 'product'),
-                    center=center
-                )
-                detections.append(det)
-                
-                # Draw bounding box
-                color = (0, 255, 0)  # Green for products
-                cv2.rectangle(annotated_frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                
-                # Draw label
-                label = f"{det.class_name}: {conf:.2f}"
-                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                cv2.rectangle(annotated_frame, (int(x1), int(y1)-20), (int(x1)+tw, int(y1)), color, -1)
-                cv2.putText(annotated_frame, label, (int(x1), int(y1)-5), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-        
-        self.frame_count += 1
-        return detections, annotated_frame
     
     def count_inventory(self, detections: List[Detection], frame_shape: Tuple[int, ...]) -> InventoryCount:
         """Generate inventory count from detections"""
@@ -455,7 +409,6 @@ class InventoryDetector:
         
         # Save statistics
         if save_stats and stats:
-            import json
             stats_path = Path(output_path).parent / "stats.json" if output_path else "stats.json"
             with open(stats_path, 'w') as f:
                 json.dump(stats, f, indent=2)
@@ -474,7 +427,7 @@ class InventoryDetector:
         
         # Text info
         y_offset = 40
-        cv2.putText(frame, "📦 INVENTORY STATUS", (20, y_offset), 
+        cv2.putText(frame, "INVENTORY STATUS", (20, y_offset), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
         
         y_offset += 30

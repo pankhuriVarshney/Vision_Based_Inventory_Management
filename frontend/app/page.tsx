@@ -13,6 +13,8 @@ import { SystemInfo } from "@/components/system-info"
 import { useInventoryStream } from "@/hooks/use-inventory-stream"
 import { generateDensityMap, generateMockLogs } from "@/lib/mock-data"
 import type { GridSize, ModelType } from "@/lib/types"
+import { ContinualLearningPanel } from "@/components/ContinualLearningPanel"
+
 
 // ROS Stream Component (import this - you need to create this file)
 import { ROSVideoStream } from "@/components/ROSVideoStream"
@@ -93,7 +95,14 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
                     port={rosStreamPort}
                   />
                 </div>
-
+              <div className="grid gap-4 lg:grid-cols-3 lg:gap-6">
+                <div className="lg:col-span-1">
+                  <ContinualLearningPanel />
+                </div>
+                <div className="lg:col-span-2">
+                  {/* Existing charts or components */}
+                </div>
+              </div>
                 {/* Right panel - takes 2/5 */}
                 <div className="flex flex-col gap-4 lg:col-span-2 lg:gap-6">
                   <ShelfHeatmap densityMap={densityMap} gridSize={gridSize} />
@@ -192,6 +201,7 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
               </div>
             </div>
           )}
+          
 
           {activeView === "cameras" && (
             <div className="flex flex-col gap-4 lg:gap-6">

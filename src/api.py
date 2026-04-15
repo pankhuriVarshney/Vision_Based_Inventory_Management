@@ -13,6 +13,9 @@ from collections import deque
 import time
 from typing import Dict, List, Any
 from datetime import datetime
+from pathlib import Path
+import pickle
+import os
 
 app = FastAPI(title="Vision-Based Inventory API")
 
@@ -419,7 +422,109 @@ manager = ConnectionManager()
 #     except Exception as e:
 #         print(f"WebSocket error: {e}")
 #         manager.disconnect(websocket)
+@app.get("/api/learning/status")
+async def get_learning_status():
+    """Get current continual learning status"""
+    try:
+        # Try to load learning state
+        state_path = Path("/home/sonik/Vision_Based_Inventory_Management/models/continual_learning_state.pkl")
+        
+        learning_stats = {
+            "status": "active",
+            "buffer_size": 0,
+            "buffer_max": 500,
+            "avg_confidence": 0,
+            "fill_percent": 0,
+            "total_learning_events": 0,
+            "last_learning_time": None,
+            "auto_learn_enabled": True,
+            "trigger_threshold": 0.6
+        }
+        
+        # If we have a learning node, we can get stats from ROS
+        # For now, try to load from file
+        if state_path.exists():
+            with open(state_path, 'rb') as f:
+                state = pickle.load(f)
+                if hasattr(state, 'learning_stats'):
+                    learning_stats["total_learning_events"] = len(state.learning_stats)
+                if hasattr(state, 'buffer'):
+                    learning_stats["buffer_size"] = len(state.buffer)
+        
+        return {
+            "success": True,
+            "data": learning_stats
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {
+                "status": "initializing",
+                "message": "No learning data yet. System is collecting experiences."
+            }
+        }
 
+@app.get("/api/learning/history")
+async def get_learning_history(limit: int = 20):
+    """Get history of learning events"""
+    try:
+        state_path = Path("/home/sonik/Vision_Based_Inventory_Management/models/continual_learning_state.pkl")
+        
+        history = []
+        if state_path.exists():
+            with open(state_path, 'rb') as f:
+                state = pickle.load(f)
+                if hasattr(state, 'learning_stats'):
+                    history = [
+                        {
+                            "timestamp": stat.timestamp,
+                            "buffer_size": stat.buffer_size,
+                            "avg_confidence": stat.avg_confidence,
+                            "loss_before": stat.loss_before,
+                            "loss_after": stat.loss_after,
+                            "success": stat.success
+                        }
+                        for stat in state.learning_stats[-limit:]
+                    ]
+        
+        return {
+            "success": True,
+            "data": {
+                "learning_events": history,
+                "total_events": len(history)
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {"learning_events": []}
+        }
+
+@app.get("/api/learning/trigger")
+async def trigger_learning():
+    """Manually trigger continual learning"""
+    try:
+        # Publish to ROS topic if available
+        import subprocess
+        result = subprocess.run(
+            ['ros2', 'topic', 'pub', '/learning/trigger', 'std_msgs/Bool', 'data: true', '--once'],
+            capture_output=True,
+            text=True
+        )
+        
+        return {
+            "success": True,
+            "message": "Learning triggered successfully",
+            "ros_output": result.stdout
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Could not trigger learning. Make sure ROS2 is running."
+        }
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

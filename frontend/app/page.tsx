@@ -35,8 +35,9 @@ export default function DashboardPage() {
   // Real-time data stream from backend API (inventory only)
   // In page.tsx, change the useInventoryStream hook call:
 const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
-  useMock: false,  // Make sure this is false
+  useMock: false,
   wsUrl: `ws://${process.env.NEXT_PUBLIC_PI_IP || '192.168.1.4'}:8000/ws/inventory`,
+  refreshInterval: 10000, // 10 seconds polling for REST fallback
 });
 
   // Get Pi IP from environment or use default

@@ -1,7 +1,6 @@
 // frontend/hooks/use-inventory-stream.ts
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { FrameData, TimeSeriesPoint, Detection } from '@/lib/types';
-import { apiClient } from '@/lib/api-client';
+import { FrameData, TimeSeriesPoint } from '@/lib/types';
 
 interface UseInventoryStreamProps {
   useMock?: boolean;
@@ -12,9 +11,9 @@ interface UseInventoryStreamProps {
 export function useInventoryStream({ 
   useMock = false, 
   wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://192.168.1.4:8000/ws/inventory',
-  refreshInterval = 2000
+  refreshInterval = 5000
 }: UseInventoryStreamProps) {
-  const [currentFrame, setCurrentFrame] = useState<FrameData>(() => ({
+  const [currentFrame, setCurrentFrame] = useState<FrameData>({
     frame_id: 0,
     timestamp: Date.now() / 1000,
     detections: [],
@@ -24,18 +23,19 @@ export function useInventoryStream({
       density_score: 0,
       coverage_ratio: 0,
     },
-    density_map: [[0]],
+    density_map: [[0,0,0], [0,0,0], [0,0,0]],
     fps: 0,
-  }));
+  });
   const [timeSeries, setTimeSeries] = useState<TimeSeriesPoint[]>([]);
   const [connected, setConnected] = useState(false);
   const [framesProcessed, setFramesProcessed] = useState(0);
   
-  const intervalRef = useRef<NodeJS.Timeout>();
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const timeSeriesRef = useRef<TimeSeriesPoint[]>([]);
+  const mountedRef = useRef(true);
 
-  // Initialize time series with 60 points
+  // Initialize time series
   useEffect(() => {
     const initialPoints: TimeSeriesPoint[] = [];
     const now = Date.now();
@@ -70,50 +70,50 @@ export function useInventoryStream({
     setTimeSeries(updatedSeries);
   }, []);
 
-  // Real data via WebSocket
-  useEffect(() => {
-    if (useMock) {
-      console.log('Using mock data mode');
-      return;
+  const connectWebSocket = useCallback(() => {
+    if (!mountedRef.current) return;
+    
+    // Close existing connection if any
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      return; // Already connected
     }
 
-    console.log(`Connecting to WebSocket: ${wsUrl}`);
-    
+    console.log('📡 Connecting to WebSocket...');
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log('✅ Inventory WebSocket connected');
+      if (!mountedRef.current) return;
+      console.log('✅ WebSocket connected');
       setConnected(true);
     };
 
     ws.onmessage = (event) => {
+      if (!mountedRef.current) return;
       try {
         const data = JSON.parse(event.data);
         
-        // Convert WebSocket data to FrameData format
         const frameData: FrameData = {
           frame_id: framesProcessed + 1,
           timestamp: Date.now() / 1000,
           detections: data.detections || [],
           inventory: {
-            total_objects: data.total_objects || data.inventory?.total_objects || 0,
-            class_counts: data.class_counts || data.inventory?.class_counts || {},
-            density_score: data.density_score || data.inventory?.density_score || 0,
-            coverage_ratio: data.coverage_ratio || 0.5,
+            total_objects: data.total_objects || 0,
+            class_counts: data.class_counts || {},
+            density_score: data.density_score || 0,
+            coverage_ratio: (data.total_objects || 0) / 100,
           },
-          density_map: data.density_map || generateDefaultDensityMap(),
-          fps: data.fps || 0,
+          density_map: generateDensityMap(data.total_objects || 0),
+          fps: 1,
         };
         
         setCurrentFrame(frameData);
         setFramesProcessed(prev => prev + 1);
         
-        // Update time series
         updateTimeSeries(
           frameData.inventory.total_objects,
           frameData.inventory.density_score,
-          frameData.fps || 0
+          1
         );
       } catch (error) {
         console.error('Error parsing WebSocket data:', error);
@@ -121,57 +121,74 @@ export function useInventoryStream({
     };
 
     ws.onerror = (error) => {
-      console.error('❌ Inventory WebSocket error:', error);
+      console.error('❌ WebSocket error:', error);
       setConnected(false);
     };
 
     ws.onclose = () => {
-      console.log('Inventory WebSocket closed, attempting reconnect in 3s...');
+      if (!mountedRef.current) return;
+      console.log('⚠️ WebSocket disconnected, reconnecting in 10s...');
       setConnected(false);
-      // Attempt reconnect
-      setTimeout(() => {
-        if (wsRef.current?.readyState !== WebSocket.OPEN) {
-          console.log('Reconnecting...');
-          const newWs = new WebSocket(wsUrl);
-          wsRef.current = newWs;
+      
+      // Clear any existing reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      
+      // Reconnect after delay
+      reconnectTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) {
+          connectWebSocket();
         }
-      }, 3000);
+      }, 10000); // 10 second reconnect delay
     };
+  }, [wsUrl, framesProcessed, updateTimeSeries]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    
+    if (!useMock) {
+      connectWebSocket();
+    }
+    
     return () => {
+      mountedRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
-  }, [useMock, wsUrl, framesProcessed, updateTimeSeries]);
+  }, [useMock, connectWebSocket]);
 
-  // Also poll REST API as fallback
+  // Poll REST API as fallback (but less frequently)
   useEffect(() => {
     if (useMock) return;
 
     const fetchInventory = async () => {
       try {
-        const stats = await apiClient.getInventoryCount();
-        if (stats && stats.current_count !== undefined) {
+        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://192.168.1.4:8000'}/api/inventory/count`);
+        const data = await response.json();
+        if (data.success && data.data?.current?.current_count !== undefined) {
           setCurrentFrame(prev => ({
             ...prev,
             inventory: {
               ...prev.inventory,
-              total_objects: stats.current_count,
+              total_objects: data.data.current.current_count,
             },
           }));
         }
       } catch (error) {
-        console.error('REST API fetch error:', error);
+        console.error('REST API error:', error);
       }
     };
 
-    intervalRef.current = setInterval(fetchInventory, refreshInterval);
-    
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [useMock, refreshInterval]);
+    // Poll every 10 seconds instead of 2
+    const interval = setInterval(fetchInventory, 10000);
+    return () => clearInterval(interval);
+  }, [useMock]);
 
   return {
     currentFrame,
@@ -181,10 +198,9 @@ export function useInventoryStream({
   };
 }
 
-function generateDefaultDensityMap(): number[][] {
-  return [
-    [0, 0, 0],
-    [0, 0, 0],
-    [0, 0, 0],
-  ];
+function generateDensityMap(itemCount: number): number[][] {
+  if (itemCount === 0) return [[0,0,0], [0,0,0], [0,0,0]];
+  if (itemCount <= 2) return [[0,1,0], [0,0,0], [0,0,0]];
+  if (itemCount <= 5) return [[1,1,0], [0,1,0], [0,0,0]];
+  return [[2,2,1], [1,2,1], [0,1,1]];
 }

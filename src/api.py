@@ -343,6 +343,7 @@ def generate_density_map(item_count: int):
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.last_broadcast = {}
     
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -354,12 +355,22 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
         print(f"🔌 WebSocket client disconnected. Total: {len(self.active_connections)}")
     
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        try:
+            await websocket.send_json(message)
+        except:
+            self.disconnect(websocket)
+    
     async def broadcast(self, message: dict):
+        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
             except:
-                pass
+                disconnected.append(connection)
+        
+        for connection in disconnected:
+            self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -367,26 +378,46 @@ manager = ConnectionManager()
 async def websocket_inventory(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        last_sent_count = -1
+        last_count = -1
+        last_status = ""
+        
+        # Send initial data immediately
+        initial_data = {
+            "total_objects": inventory_state["current_count"],
+            "density_score": inventory_state["density_score"],
+            "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
+            "status": inventory_state["status"],
+            "class_counts": inventory_state["class_counts"],
+            "timestamp": time.time()
+        }
+        await manager.send_personal_message(initial_data, websocket)
+        
+        # Only send updates when data changes
         while True:
-            # Send current inventory data when it changes
             current_count = inventory_state["current_count"]
+            current_status = inventory_state["status"]
             
-            # Only send if data changed or every 5 seconds
-            if current_count != last_sent_count or int(time.time()) % 5 == 0:
+            # Only send if data changed
+            if current_count != last_count or current_status != last_status:
                 data = {
                     "total_objects": current_count,
                     "density_score": inventory_state["density_score"],
                     "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
-                    "status": inventory_state["status"],
+                    "status": current_status,
                     "class_counts": inventory_state["class_counts"],
                     "timestamp": time.time()
                 }
-                await websocket.send_json(data)
-                last_sent_count = current_count
+                await manager.send_personal_message(data, websocket)
+                last_count = current_count
+                last_status = current_status
             
-            await asyncio.sleep(1)  # Check every second
+            # Wait 2 seconds before checking again
+            await asyncio.sleep(2)
+            
     except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
 if __name__ == "__main__":

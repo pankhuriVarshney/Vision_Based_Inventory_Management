@@ -1,80 +1,91 @@
-"use client"
+"use client";
 
-import { useState, useMemo } from "react"
-import { AppSidebar } from "@/components/app-sidebar"
-import { DashboardHeader } from "@/components/dashboard-header"
-import { VideoFeed } from "@/components/video-feed"
-import { StatsCards } from "@/components/stats-cards"
-import { ShelfHeatmap } from "@/components/shelf-heatmap"
-import { RealtimeChart, FpsChart } from "@/components/realtime-chart"
-import { ControlPanel } from "@/components/control-panel"
-import { ActivityLog } from "@/components/activity-log"
-import { SystemInfo } from "@/components/system-info"
-import { useInventoryStream } from "@/hooks/use-inventory-stream"
-import { generateDensityMap, generateMockLogs } from "@/lib/mock-data"
-import type { GridSize, ModelType } from "@/lib/types"
-import { ContinualLearningPanel } from "@/components/ContinualLearningPanel"
-
-
-// ROS Stream Component (import this - you need to create this file)
-import { ROSVideoStream } from "@/components/ROSVideoStream"
-import { InventoryDashboard } from "@/components/inventory-dashboard"
-import { DetectionsTable } from "@/components/detections-table"
-import { Detection } from "@/lib/api-client"
+import { useState, useMemo } from "react";
+import { AppSidebar } from "@/components/app-sidebar";
+import { DashboardHeader } from "@/components/dashboard-header";
+import { StatsCards } from "@/components/stats-cards";
+import { ShelfHeatmap } from "@/components/shelf-heatmap";
+import { RealtimeChart, FpsChart } from "@/components/realtime-chart";
+import { ControlPanel } from "@/components/control-panel";
+import { ActivityLog } from "@/components/activity-log";
+import { SystemInfo } from "@/components/system-info";
+import { useInventoryStream } from "@/hooks/use-inventory-stream";
+import { generateDensityMap, generateMockLogs } from "@/lib/mock-data";
+import type { GridSize, ModelType } from "@/lib/types";
+import { ContinualLearningPanel } from "@/components/ContinualLearningPanel";
+import { ROSVideoStream } from "@/components/ROSVideoStream";
+import { InventoryDashboard } from "@/components/inventory-dashboard";
+import { DetectionsTable } from "@/components/detections-table";
+import { Badge } from "@/components/ui/badge";
+import { Wifi, WifiOff } from "lucide-react";
 
 export default function DashboardPage() {
-  // Controls state
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.25)
-  const [model, setModel] = useState<ModelType>("YOLOv8n")
-  const [gridSize, setGridSize] = useState<GridSize>("3x3")
-  const [activeView, setActiveView] = useState("dashboard")
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.25);
+  const [model, setModel] = useState<ModelType>("YOLOv8n");
+  const [gridSize, setGridSize] = useState<GridSize>("3x3");
+  const [activeView, setActiveView] = useState("dashboard");
 
-  // Real-time data from API
-  const [liveInventory, setLiveInventory] = useState<any>(null)
-  const [liveDetections, setLiveDetections] = useState<Detection[]>([])
-  const [liveStats, setLiveStats] = useState<any>(null)
+  // Real-time data stream
+  const {
+    currentFrame,
+    timeSeries,
+    connected,
+    framesProcessed,
+    usingWebSocket,
+  } = useInventoryStream({
+    useMock: false,
+    refreshInterval: 3000,
+  });
 
-  // Real-time data stream from backend API (inventory only)
-  // In page.tsx, change the useInventoryStream hook call:
-const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStream({
-  useMock: false,
-  // wsUrl: `ws://${process.env.NEXT_PUBLIC_PI_IP || '192.168.1.4'}:8000/ws/inventory`,
-  refreshInterval: 3000, // 10 seconds polling for REST fallback
-});
+  const piIp = process.env.NEXT_PUBLIC_PI_IP || "192.168.1.4";
+  const rosStreamPort = parseInt(
+    process.env.NEXT_PUBLIC_ROS_STREAM_PORT || "8080",
+  );
 
-  // Get Pi IP from environment or use default
-  const piIp = process.env.NEXT_PUBLIC_PI_IP || '192.168.1.4'
-  const rosStreamPort = parseInt(process.env.NEXT_PUBLIC_ROS_STREAM_PORT || '8080')
-
-  // Generate density map matching grid size selection
   const densityMap = useMemo(() => {
-    const [rows, cols] = gridSize.split("x").map(Number)
+    const [rows, cols] = gridSize.split("x").map(Number);
     if (
       currentFrame.density_map.length === rows &&
       currentFrame.density_map[0]?.length === cols
     ) {
-      return currentFrame.density_map
+      return currentFrame.density_map;
     }
-    return generateDensityMap(rows, cols)
-  }, [gridSize, currentFrame.density_map])
+    return generateDensityMap(rows, cols);
+  }, [gridSize, currentFrame.density_map]);
 
-  const logs = useMemo(() => generateMockLogs(), [])
+  const logs = useMemo(() => generateMockLogs(), []);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
-      {/* Sidebar */}
       <AppSidebar
         activeView={activeView}
         onViewChange={setActiveView}
         connected={connected}
       />
 
-      {/* Main Content */}
       <div className="flex flex-1 flex-col overflow-hidden">
         <DashboardHeader
           title="Inventory Dashboard"
           subtitle="Real-time vision-based inventory monitoring"
-        />
+        >
+          <div className="flex items-center gap-2">
+            <Badge
+              variant={connected ? "default" : "destructive"}
+              className="gap-1"
+            >
+              {connected ? (
+                <>
+                  <Wifi className="h-3 w-3" />{" "}
+                  {usingWebSocket ? "REAL-TIME" : "POLLING"}
+                </>
+              ) : (
+                <>
+                  <WifiOff className="h-3 w-3" /> OFFLINE
+                </>
+              )}
+            </Badge>
+          </div>
+        </DashboardHeader>
 
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
           {activeView === "dashboard" && (
@@ -88,22 +99,12 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
 
               {/* Main Content: Video + Side Panel */}
               <div className="grid gap-4 lg:grid-cols-5 lg:gap-6">
-                {/* Video Feed - Using ROS Stream */}
+                {/* Video Feed */}
                 <div className="lg:col-span-3">
-                  <ROSVideoStream
-                    piIp={piIp}
-                    port={rosStreamPort}
-                  />
+                  <ROSVideoStream piIp={piIp} port={rosStreamPort} />
                 </div>
-              <div className="grid gap-4 lg:grid-cols-3 lg:gap-6">
-                <div className="lg:col-span-1">
-                  <ContinualLearningPanel />
-                </div>
-                <div className="lg:col-span-2">
-                  {/* Existing charts or components */}
-                </div>
-              </div>
-                {/* Right panel - takes 2/5 */}
+
+                {/* Right panel */}
                 <div className="flex flex-col gap-4 lg:col-span-2 lg:gap-6">
                   <ShelfHeatmap densityMap={densityMap} gridSize={gridSize} />
                   <ControlPanel
@@ -128,10 +129,13 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
                 </div>
               </div>
 
-              {/* Bottom Row: Activity + System */}
+              {/* Bottom Row: Activity + Learning + System */}
               <div className="grid gap-4 lg:grid-cols-5 lg:gap-6">
-                <div className="lg:col-span-3">
+                <div className="lg:col-span-2">
                   <ActivityLog logs={logs} />
+                </div>
+                <div className="lg:col-span-1">
+                  <ContinualLearningPanel />
                 </div>
                 <div className="lg:col-span-2">
                   <SystemInfo
@@ -157,42 +161,31 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
               </div>
               <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
                 <ShelfHeatmap densityMap={densityMap} gridSize={gridSize} />
-                <ActivityLog logs={logs} />
+                <ContinualLearningPanel />
               </div>
             </div>
           )}
 
           {activeView === "live" && (
             <div className="flex flex-col gap-4 lg:gap-6">
-              {/* Live ROS Stream View */}
               <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
-                {/* Live Video Stream from ROS */}
-                <ROSVideoStream
-                  piIp={piIp}
-                  port={rosStreamPort}
-                />
-
-                {/* Live Inventory from API */}
+                <ROSVideoStream piIp={piIp} port={rosStreamPort} />
                 <InventoryDashboard
                   inventory={currentFrame.inventory}
                   detections={currentFrame.detections}
                 />
               </div>
-
-              {/* Detections Table */}
               <div className="grid gap-4 lg:grid-cols-2 lg:gap-6">
-                <DetectionsTable 
-                  detections={currentFrame.detections.map(d => ({
+                <DetectionsTable
+                  detections={currentFrame.detections.map((d) => ({
                     bbox: d.bbox,
                     confidence: d.confidence,
                     class_id: d.class_id,
                     class_name: d.class_name,
-                    center: d.center
-                  }))} 
-                  maxDisplay={20} 
+                    center: d.center,
+                  }))}
+                  maxDisplay={20}
                 />
-                
-                {/* System Stats */}
                 <SystemInfo
                   connected={connected}
                   model={model}
@@ -201,7 +194,6 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
               </div>
             </div>
           )}
-          
 
           {activeView === "cameras" && (
             <div className="flex flex-col gap-4 lg:gap-6">
@@ -233,13 +225,28 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
                   model={model}
                   framesProcessed={framesProcessed}
                 />
-                
-                {/* ROS Stream Info Card */}
+                <ContinualLearningPanel />
+
                 <div className="rounded-lg border border-border bg-card p-4">
-                  <h3 className="text-sm font-medium mb-2">📹 ROS Stream Configuration</h3>
+                  <h3 className="text-sm font-medium mb-2">
+                    📹 ROS Stream Configuration
+                  </h3>
                   <div className="space-y-1 text-xs text-muted-foreground">
-                    <p>Stream URL: <code className="text-primary">http://{piIp}:{rosStreamPort}/stream.mjpg</code></p>
-                    <p>Status: {connected ? '🟢 Connected' : '🔴 Disconnected'}</p>
+                    <p>
+                      Stream URL:{" "}
+                      <code className="text-primary">
+                        http://{piIp}:{rosStreamPort}/stream.mjpg
+                      </code>
+                    </p>
+                    <p>
+                      Status: {connected ? "🟢 Connected" : "🔴 Disconnected"}
+                    </p>
+                    <p>
+                      Connection:{" "}
+                      {usingWebSocket
+                        ? "⚡ WebSocket (Real-time)"
+                        : "📡 HTTP Polling"}
+                    </p>
                     <p>Frames: {framesProcessed}</p>
                   </div>
                 </div>
@@ -249,5 +256,5 @@ const { currentFrame, timeSeries, connected, framesProcessed } = useInventoryStr
         </main>
       </div>
     </div>
-  )
+  );
 }

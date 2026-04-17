@@ -30,6 +30,16 @@ export interface InventoryStats {
   current_count: number;
   data_points: number;
 }
+export interface LearningStats {
+  status: string;
+  buffer_size: number;
+  buffer_max: number;
+  avg_confidence: number;
+  fill_percent: number;
+  total_learning_events: number;
+  auto_learn_enabled: boolean;
+}
+
 
 export class InventoryAPIClient {
   private baseUrl: string;
@@ -106,6 +116,49 @@ export class InventoryAPIClient {
     });
     return response.blob();
   }
+  async getLearningStatus(): Promise<LearningStats> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/learning/status`);
+      const data = await response.json();
+      if (data.success) {
+        return data.data;
+      }
+      return {
+        status: 'initializing',
+        buffer_size: 0,
+        buffer_max: 500,
+        avg_confidence: 0,
+        fill_percent: 0,
+        total_learning_events: 0,
+        auto_learn_enabled: true
+      };
+    } catch (error) {
+      console.error('Failed to fetch learning status:', error);
+      return {
+        status: 'error',
+        buffer_size: 0,
+        buffer_max: 500,
+        avg_confidence: 0,
+        fill_percent: 0,
+        total_learning_events: 0,
+        auto_learn_enabled: true
+      };
+    }
+  }
+
+  async triggerLearning(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/learning/trigger`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      return data.success;
+    } catch (error) {
+      console.error('Failed to trigger learning:', error);
+      return false;
+    }
+  }
+
 }
 
 export const apiClient = new InventoryAPIClient();

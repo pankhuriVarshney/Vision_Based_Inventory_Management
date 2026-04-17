@@ -1,12 +1,14 @@
-"use client"
+"use client";
 
-import { Badge } from "@/components/ui/badge"
-import { Bell } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge";
+import { Bell } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Children } from "react";
 
 interface DashboardHeaderProps {
-  title: string
-  subtitle?: string
+  title: string;
+  subtitle?: string;
+  children?: React.ReactNode;
 }
 
 export function DashboardHeader({ title, subtitle }: DashboardHeaderProps) {
@@ -14,10 +16,16 @@ export function DashboardHeader({ title, subtitle }: DashboardHeaderProps) {
     <header className="flex items-center justify-between border-b border-border bg-card px-6 py-3">
       <div className="flex flex-col">
         <h1 className="text-lg font-semibold text-foreground">{title}</h1>
-        {subtitle && <p className="text-xs text-muted-foreground">{subtitle}</p>}
+        {subtitle && (
+          <p className="text-xs text-muted-foreground">{subtitle}</p>
+        )}
       </div>
       <div className="flex items-center gap-3">
-        <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary font-mono text-xs">
+        {children}
+        <Badge
+          variant="outline"
+          className="border-primary/30 bg-primary/10 text-primary font-mono text-xs"
+        >
           v1.2.0
         </Badge>
         <Button variant="ghost" size="icon" className="h-8 w-8 relative">
@@ -26,5 +34,5 @@ export function DashboardHeader({ title, subtitle }: DashboardHeaderProps) {
         </Button>
       </div>
     </header>
-  )
+  );
 }

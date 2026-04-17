@@ -1,12 +1,13 @@
 // frontend/hooks/use-inventory-stream.ts
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { FrameData, TimeSeriesPoint } from '@/lib/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://192.168.1.4:8000';
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://192.168.1.4:8000/ws/inventory';
 
 export function useInventoryStream({ 
   useMock = false, 
-  refreshInterval = 5000  // Poll every 5 seconds
+  refreshInterval = 3000  // Fallback polling interval
 }: { 
   useMock?: boolean; 
   refreshInterval?: number;
@@ -27,9 +28,12 @@ export function useInventoryStream({
   const [timeSeries, setTimeSeries] = useState<TimeSeriesPoint[]>([]);
   const [connected, setConnected] = useState(false);
   const [framesProcessed, setFramesProcessed] = useState(0);
+  const [usingWebSocket, setUsingWebSocket] = useState(false);
   
   const timeSeriesRef = useRef<TimeSeriesPoint[]>([]);
   const mountedRef = useRef(true);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
 
   // Initialize time series with 60 points
   useEffect(() => {
@@ -50,7 +54,7 @@ export function useInventoryStream({
     timeSeriesRef.current = initialPoints;
   }, []);
 
-  const updateTimeSeries = (totalObjects: number, densityScore: number, fps: number) => {
+  const updateTimeSeries = useCallback((totalObjects: number, densityScore: number, fps: number) => {
     const now = Date.now();
     const date = new Date(now);
     const newPoint: TimeSeriesPoint = {
@@ -64,90 +68,148 @@ export function useInventoryStream({
     const updatedSeries = [...timeSeriesRef.current.slice(1), newPoint];
     timeSeriesRef.current = updatedSeries;
     setTimeSeries(updatedSeries);
-  };
+  }, []);
 
-  // Poll inventory data
+  const updateFrame = useCallback((totalObjects: number, densityScore: number, status: string) => {
+    setCurrentFrame(prev => ({
+      ...prev,
+      frame_id: prev.frame_id + 1,
+      timestamp: Date.now() / 1000,
+      inventory: {
+        total_objects: totalObjects,
+        class_counts: {},
+        density_score: densityScore,
+        coverage_ratio: totalObjects / 100,
+      },
+      density_map: generateDensityMap(totalObjects),
+      fps: usingWebSocket ? 10 : 1,
+    }));
+    
+    setFramesProcessed(prev => prev + 1);
+    updateTimeSeries(totalObjects, densityScore, usingWebSocket ? 10 : 1);
+  }, [updateTimeSeries, usingWebSocket]);
+
+  // WebSocket connection for real-time updates
+  const connectWebSocket = useCallback(() => {
+    if (!mountedRef.current) return;
+    
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    console.log('📡 Connecting to WebSocket...');
+    const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (!mountedRef.current) return;
+      console.log('✅ WebSocket connected');
+      setConnected(true);
+      setUsingWebSocket(true);
+    };
+
+    ws.onmessage = (event) => {
+      if (!mountedRef.current) return;
+      try {
+        const data = JSON.parse(event.data);
+        updateFrame(data.total_objects || 0, data.density_score || 0, data.status || 'unknown');
+      } catch (error) {
+        console.error('Error parsing WebSocket data:', error);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('❌ WebSocket error:', error);
+      setConnected(false);
+      setUsingWebSocket(false);
+    };
+
+    ws.onclose = () => {
+      if (!mountedRef.current) return;
+      console.log('⚠️ WebSocket disconnected, falling back to HTTP polling...');
+      setConnected(false);
+      setUsingWebSocket(false);
+      
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      
+      // Attempt to reconnect WebSocket after 10 seconds
+      reconnectTimeoutRef.current = setTimeout(() => {
+        if (mountedRef.current) {
+          connectWebSocket();
+        }
+      }, 10000);
+    };
+  }, [updateFrame]);
+
+  // HTTP polling as fallback
+  const fetchInventory = useCallback(async () => {
+    if (!mountedRef.current) return;
+    
+    try {
+      const response = await fetch(`${API_URL}/api/inventory/count`);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.success && data.data?.current) {
+          const currentCount = data.data.current.current_count || 0;
+          const densityScore = data.data.current.density_score || 0;
+          const status = data.data.current.status || 'unknown';
+          
+          updateFrame(currentCount, densityScore, status);
+          setConnected(true);
+        }
+      } else {
+        setConnected(false);
+      }
+    } catch (error) {
+      console.error('Fetch error:', error);
+      setConnected(false);
+    }
+  }, [updateFrame]);
+
+  // Initialize connection
   useEffect(() => {
+    mountedRef.current = true;
+    
     if (useMock) {
-      // Mock data mode
+      // Mock mode
       const interval = setInterval(() => {
-        const mockTotal = Math.floor(Math.random() * 5);
-        setCurrentFrame(prev => ({
-          ...prev,
-          frame_id: prev.frame_id + 1,
-          timestamp: Date.now() / 1000,
-          inventory: {
-            total_objects: mockTotal,
-            class_counts: { item: mockTotal },
-            density_score: mockTotal / 10,
-            coverage_ratio: mockTotal / 100,
-          },
-          density_map: [[mockTotal, 0, 0], [0, 0, 0], [0, 0, 0]],
-        }));
-        setFramesProcessed(prev => prev + 1);
-        setConnected(true);
-        updateTimeSeries(mockTotal, mockTotal / 10, 1);
+        const mockTotal = Math.floor(Math.random() * 8);
+        updateFrame(mockTotal, mockTotal / 10, mockTotal > 0 ? 'in_stock' : 'out_of_stock');
       }, refreshInterval);
       return () => clearInterval(interval);
     }
 
-    mountedRef.current = true;
+    // Try WebSocket first
+    connectWebSocket();
     
-    const fetchInventory = async () => {
-      if (!mountedRef.current) return;
-      
-      try {
-        const response = await fetch(`${API_URL}/api/inventory/count`);
-        if (response.ok) {
-          const data = await response.json();
-          if (data.success && data.data?.current) {
-            const currentCount = data.data.current.current_count || 0;
-            const densityScore = data.data.current.density_score || 0;
-            
-            setCurrentFrame(prev => ({
-              ...prev,
-              frame_id: prev.frame_id + 1,
-              timestamp: Date.now() / 1000,
-              inventory: {
-                total_objects: currentCount,
-                class_counts: {},
-                density_score: densityScore,
-                coverage_ratio: currentCount / 100,
-              },
-              density_map: generateDensityMap(currentCount),
-              fps: 1,
-            }));
-            
-            setFramesProcessed(prev => prev + 1);
-            setConnected(true);
-            updateTimeSeries(currentCount, densityScore, 1);
-          }
-        } else {
-          setConnected(false);
-        }
-      } catch (error) {
-        console.error('Fetch error:', error);
-        setConnected(false);
+    // Also start HTTP polling as backup (less frequent)
+    const pollInterval = setInterval(() => {
+      if (!usingWebSocket) {
+        fetchInventory();
       }
-    };
-
-    // Initial fetch
-    fetchInventory();
-    
-    // Poll every refreshInterval
-    const interval = setInterval(fetchInventory, refreshInterval);
+    }, refreshInterval);
     
     return () => {
       mountedRef.current = false;
-      clearInterval(interval);
+      clearInterval(pollInterval);
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
-  }, [useMock, refreshInterval]);
+  }, [useMock, refreshInterval, connectWebSocket, fetchInventory, usingWebSocket]);
 
   return {
     currentFrame,
     timeSeries,
     connected,
     framesProcessed,
+    usingWebSocket,
   };
 }
 

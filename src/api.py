@@ -16,8 +16,9 @@ from datetime import datetime
 from pathlib import Path
 import pickle
 import os
+import subprocess
 
-app = FastAPI(title="Vision-Based Inventory API")
+app = FastAPI(title="Vision-Based Inventory API - Real-time")
 
 # CORS for frontend
 app.add_middleware(
@@ -50,7 +51,7 @@ class ROSInventorySubscriber(Node):
     def __init__(self):
         super().__init__('api_inventory_subscriber')
         
-        # Subscribe to inventory status with your custom message type
+        # Subscribe to inventory status
         self.inventory_sub = self.create_subscription(
             InventoryCount,
             '/inventory_status',
@@ -64,7 +65,6 @@ class ROSInventorySubscriber(Node):
     def inventory_callback(self, msg: InventoryCount):
         """Handle inventory status messages from ROS"""
         try:
-            # Extract data from your message format
             total_items = msg.total_objects
             
             # Build class counts dictionary
@@ -85,13 +85,12 @@ class ROSInventorySubscriber(Node):
             inventory_state["status"] = status
             inventory_state["last_update"] = time.time()
             
-            # Update statistics (maintain running average)
+            # Update statistics
             if inventory_state["data_points"] == 0:
                 inventory_state["avg_count"] = float(total_items)
                 inventory_state["min_count"] = total_items
                 inventory_state["max_count"] = total_items
             else:
-                # Update rolling average
                 n = inventory_state["data_points"]
                 inventory_state["avg_count"] = (inventory_state["avg_count"] * n + total_items) / (n + 1)
                 inventory_state["min_count"] = min(inventory_state["min_count"], total_items)
@@ -110,13 +109,10 @@ class ROSInventorySubscriber(Node):
                 "class_counts": class_counts
             })
             
-            # Print update (helps with debugging)
-            print(f"📊 Inventory: {total_items} items | Status: {status} | Density: {density_score:.2f} | Classes: {class_counts}")
+            print(f"📊 Inventory: {total_items} items | Status: {status} | Density: {density_score:.2f}")
             
         except Exception as e:
             print(f"❌ Error parsing inventory message: {e}")
-            import traceback
-            traceback.print_exc()
 
 # ROS2 Node instance
 ros_node = None
@@ -127,25 +123,21 @@ def run_ros_node():
     """Run ROS2 node in a separate thread"""
     global ros_node, ros_executor
     
-    # Initialize ROS2 if not already
     if not rclpy.ok():
         rclpy.init()
     
-    # Create node
     ros_node = ROSInventorySubscriber()
-    
-    # Use multi-threaded executor
     ros_executor = MultiThreadedExecutor()
     ros_executor.add_node(ros_node)
     
     try:
-        # Spin the executor
         ros_executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
         ros_executor.shutdown()
-        ros_node.destroy_node()
+        if ros_node:
+            ros_node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
 
@@ -158,11 +150,9 @@ async def startup_event():
     print("=" * 60)
     print("📡 Connecting to ROS2 topics...")
     
-    # Start ROS node in background thread
     ros_thread = threading.Thread(target=run_ros_node, daemon=True)
     ros_thread.start()
     
-    # Wait for connection
     await asyncio.sleep(2)
     
     print(f"✅ ROS subscriber started")
@@ -185,10 +175,9 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    """Root endpoint"""
     return {
         "name": "Vision-Based Inventory API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
         "ros_connected": inventory_state["last_update"] > 0,
         "endpoints": [
@@ -196,15 +185,17 @@ async def root():
             "/api/inventory/count",
             "/api/inventory/history",
             "/api/detections/current",
+            "/api/learning/status",
+            "/api/learning/history",
+            "/api/learning/trigger",
             "/ws/inventory"
         ]
     }
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint"""
     time_since_update = time.time() - inventory_state["last_update"] if inventory_state["last_update"] > 0 else 999
-    is_connected = time_since_update < 10  # Connected if update within last 10 seconds
+    is_connected = time_since_update < 10
     
     return {
         "success": True,
@@ -220,7 +211,6 @@ async def health_check():
 
 @app.get("/api/inventory/count")
 async def get_inventory_count():
-    """Get current inventory count from ROS"""
     return {
         "success": True,
         "data": {
@@ -238,7 +228,6 @@ async def get_inventory_count():
 
 @app.get("/api/inventory/history")
 async def get_inventory_history(limit: int = 100):
-    """Get inventory history"""
     history_list = list(inventory_state["history"])
     return {
         "success": True,
@@ -250,7 +239,6 @@ async def get_inventory_history(limit: int = 100):
 
 @app.get("/api/inventory/class_counts")
 async def get_class_counts():
-    """Get current class counts"""
     return {
         "success": True,
         "data": {
@@ -262,7 +250,6 @@ async def get_class_counts():
 
 @app.get("/api/detections/current")
 async def get_current_detections():
-    """Get current detections"""
     return {
         "success": True,
         "data": {
@@ -273,7 +260,6 @@ async def get_current_detections():
 
 @app.post("/api/inventory/export")
 async def export_inventory(format: str = "json"):
-    """Export inventory data"""
     if format == "json":
         export_data = {
             "export_time": time.time(),
@@ -281,12 +267,8 @@ async def export_inventory(format: str = "json"):
             "current_inventory": inventory_state["current_count"],
             "history": list(inventory_state["history"])
         }
-        return JSONResponse(
-            content=export_data,
-            media_type="application/json"
-        )
+        return JSONResponse(content=export_data, media_type="application/json")
     else:
-        # CSV export
         import csv
         from io import StringIO
         
@@ -304,14 +286,10 @@ async def export_inventory(format: str = "json"):
                 record["status"]
             ])
         
-        return JSONResponse(
-            content=output.getvalue(),
-            media_type="text/csv"
-        )
+        return JSONResponse(content=output.getvalue(), media_type="text/csv")
 
 @app.get("/api/stream/frame")
 async def get_latest_frame():
-    """Get latest frame with detections"""
     return {
         "success": True,
         "frame": {
@@ -330,7 +308,6 @@ async def get_latest_frame():
     }
 
 def generate_density_map(item_count: int):
-    """Generate density map based on item count"""
     if item_count == 0:
         return [[0,0,0], [0,0,0], [0,0,0]]
     elif item_count <= 2:
@@ -342,11 +319,158 @@ def generate_density_map(item_count: int):
     else:
         return [[2,2,2], [1,2,2], [1,1,1]]
 
-# WebSocket for real-time updates
+# ========== Continual Learning Endpoints ==========
+
+@app.get("/api/learning/status")
+async def get_learning_status():
+    """Get current continual learning status"""
+    try:
+        # Try multiple possible state file paths
+        state_paths = [
+            Path("/home/sonik/Vision_Based_Inventory_Management/models/learning_state.pkl"),
+            Path("/home/sonik/Vision_Based_Inventory_Management/models/continual_learning_state.pkl"),
+            Path("/home/sonik/ros2_ws/learning_state.pkl")
+        ]
+        
+        learning_stats = {
+            "status": "active",
+            "buffer_size": 0,
+            "buffer_max": 500,
+            "avg_confidence": 0,
+            "fill_percent": 0,
+            "total_learning_events": 0,
+            "last_learning_time": None,
+            "auto_learn_enabled": True,
+            "trigger_threshold": 0.6,
+            "min_buffer_for_learning": 50,
+            "detection_count": 0
+        }
+        
+        for state_path in state_paths:
+            if state_path.exists():
+                try:
+                    with open(state_path, 'rb') as f:
+                        state = pickle.load(f)
+                        learning_stats["total_learning_events"] = state.get('learning_events', 0)
+                        learning_stats["last_learning_time"] = state.get('timestamp', None)
+                        learning_stats["detection_count"] = state.get('detection_count', 0)
+                    break
+                except:
+                    pass
+        
+        # Also check buffer file
+        buffer_path = Path("/home/sonik/Vision_Based_Inventory_Management/models/learning_state_buffer.pkl")
+        if buffer_path.exists():
+            try:
+                with open(buffer_path, 'rb') as f:
+                    buffer_data = pickle.load(f)
+                    confidences = buffer_data.get('confidences', [])
+                    learning_stats["buffer_size"] = len(confidences)
+                    if confidences:
+                        avg_conf = sum(confidences) / len(confidences)
+                        learning_stats["avg_confidence"] = round(avg_conf, 3)
+                        learning_stats["fill_percent"] = round((len(confidences) / learning_stats["buffer_max"]) * 100, 1)
+            except:
+                pass
+        
+        return {
+            "success": True,
+            "data": learning_stats
+        }
+    except Exception as e:
+        print(f"Error in learning status: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {
+                "status": "initializing",
+                "message": "No learning data yet. System is collecting experiences."
+            }
+        }
+
+@app.get("/api/learning/history")
+async def get_learning_history(limit: int = 20):
+    """Get history of learning events"""
+    try:
+        history = []
+        state_paths = [
+            Path("/home/sonik/Vision_Based_Inventory_Management/models/learning_state.pkl"),
+            Path("/home/sonik/Vision_Based_Inventory_Management/models/continual_learning_state.pkl")
+        ]
+        
+        for state_path in state_paths:
+            if state_path.exists():
+                try:
+                    with open(state_path, 'rb') as f:
+                        state = pickle.load(f)
+                        history.append({
+                            "timestamp": state.get('timestamp', time.time()),
+                            "buffer_size": state.get('detection_count', 0),
+                            "avg_confidence": 0,
+                            "loss_before": 0,
+                            "loss_after": 0,
+                            "success": True,
+                            "learning_events": state.get('learning_events', 0)
+                        })
+                    break
+                except:
+                    pass
+        
+        return {
+            "success": True,
+            "data": {
+                "learning_events": history[-limit:],
+                "total_events": len(history)
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "data": {"learning_events": []}
+        }
+
+@app.post("/api/learning/trigger")
+async def trigger_learning():
+    """Manually trigger continual learning"""
+    try:
+        # Try to publish to ROS topic
+        result = subprocess.run(
+            ['ros2', 'topic', 'pub', '/learning/trigger', 'std_msgs/Bool', 'data: true', '--once'],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        
+        return {
+            "success": True,
+            "message": "Learning triggered successfully",
+            "ros_output": result.stdout
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "success": False,
+            "error": "Timeout - Make sure ROS2 is running",
+            "message": "Could not trigger learning. Check if ROS2 is running."
+        }
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "error": "ROS2 not found",
+            "message": "Learning trigger only works when ROS2 is running"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Could not trigger learning"
+        }
+
+# ========== WebSocket for Real-time Updates ==========
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
-        self.last_broadcast = {}
     
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -357,12 +481,6 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
         print(f"🔌 WebSocket client disconnected. Total: {len(self.active_connections)}")
-    
-    async def send_personal_message(self, message: dict, websocket: WebSocket):
-        try:
-            await websocket.send_json(message)
-        except:
-            self.disconnect(websocket)
     
     async def broadcast(self, message: dict):
         disconnected = []
@@ -377,154 +495,39 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# @app.websocket("/ws/inventory")
-# async def websocket_inventory(websocket: WebSocket):
-#     await manager.connect(websocket)
-#     try:
-#         last_count = -1
-#         last_status = ""
-        
-#         # Send initial data immediately
-#         initial_data = {
-#             "total_objects": inventory_state["current_count"],
-#             "density_score": inventory_state["density_score"],
-#             "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
-#             "status": inventory_state["status"],
-#             "class_counts": inventory_state["class_counts"],
-#             "timestamp": time.time()
-#         }
-#         await manager.send_personal_message(initial_data, websocket)
-        
-#         # Only send updates when data changes
-#         while True:
-#             current_count = inventory_state["current_count"]
-#             current_status = inventory_state["status"]
-            
-#             # Only send if data changed
-#             if current_count != last_count or current_status != last_status:
-#                 data = {
-#                     "total_objects": current_count,
-#                     "density_score": inventory_state["density_score"],
-#                     "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
-#                     "status": current_status,
-#                     "class_counts": inventory_state["class_counts"],
-#                     "timestamp": time.time()
-#                 }
-#                 await manager.send_personal_message(data, websocket)
-#                 last_count = current_count
-#                 last_status = current_status
-            
-#             # Wait 2 seconds before checking again
-#             await asyncio.sleep(2)
-            
-#     except WebSocketDisconnect:
-#         manager.disconnect(websocket)
-#     except Exception as e:
-#         print(f"WebSocket error: {e}")
-#         manager.disconnect(websocket)
-@app.get("/api/learning/status")
-async def get_learning_status():
-    """Get current continual learning status"""
+@app.websocket("/ws/inventory")
+async def websocket_inventory(websocket: WebSocket):
+    await manager.connect(websocket)
     try:
-        # Try to load learning state
-        state_path = Path("/home/sonik/Vision_Based_Inventory_Management/models/continual_learning_state.pkl")
+        last_count = -1
+        last_status = ""
         
-        learning_stats = {
-            "status": "active",
-            "buffer_size": 0,
-            "buffer_max": 500,
-            "avg_confidence": 0,
-            "fill_percent": 0,
-            "total_learning_events": 0,
-            "last_learning_time": None,
-            "auto_learn_enabled": True,
-            "trigger_threshold": 0.6
-        }
-        
-        # If we have a learning node, we can get stats from ROS
-        # For now, try to load from file
-        if state_path.exists():
-            with open(state_path, 'rb') as f:
-                state = pickle.load(f)
-                if hasattr(state, 'learning_stats'):
-                    learning_stats["total_learning_events"] = len(state.learning_stats)
-                if hasattr(state, 'buffer'):
-                    learning_stats["buffer_size"] = len(state.buffer)
-        
-        return {
-            "success": True,
-            "data": learning_stats
-        }
+        while True:
+            current_count = inventory_state["current_count"]
+            current_status = inventory_state["status"]
+            
+            # Send update every second or when data changes
+            if current_count != last_count or current_status != last_status:
+                data = {
+                    "total_objects": current_count,
+                    "density_score": inventory_state["density_score"],
+                    "shelf_capacity_percent": inventory_state["shelf_capacity_percent"],
+                    "status": current_status,
+                    "class_counts": inventory_state["class_counts"],
+                    "timestamp": time.time()
+                }
+                await websocket.send_json(data)
+                last_count = current_count
+                last_status = current_status
+            
+            await asyncio.sleep(1)  # Update every second
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "data": {
-                "status": "initializing",
-                "message": "No learning data yet. System is collecting experiences."
-            }
-        }
+        print(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
 
-@app.get("/api/learning/history")
-async def get_learning_history(limit: int = 20):
-    """Get history of learning events"""
-    try:
-        state_path = Path("/home/sonik/Vision_Based_Inventory_Management/models/continual_learning_state.pkl")
-        
-        history = []
-        if state_path.exists():
-            with open(state_path, 'rb') as f:
-                state = pickle.load(f)
-                if hasattr(state, 'learning_stats'):
-                    history = [
-                        {
-                            "timestamp": stat.timestamp,
-                            "buffer_size": stat.buffer_size,
-                            "avg_confidence": stat.avg_confidence,
-                            "loss_before": stat.loss_before,
-                            "loss_after": stat.loss_after,
-                            "success": stat.success
-                        }
-                        for stat in state.learning_stats[-limit:]
-                    ]
-        
-        return {
-            "success": True,
-            "data": {
-                "learning_events": history,
-                "total_events": len(history)
-            }
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "data": {"learning_events": []}
-        }
-
-@app.get("/api/learning/trigger")
-async def trigger_learning():
-    """Manually trigger continual learning"""
-    try:
-        # Publish to ROS topic if available
-        import subprocess
-        result = subprocess.run(
-            ['ros2', 'topic', 'pub', '/learning/trigger', 'std_msgs/Bool', 'data: true', '--once'],
-            capture_output=True,
-            text=True
-        )
-        
-        return {
-            "success": True,
-            "message": "Learning triggered successfully",
-            "ros_output": result.stdout
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "message": "Could not trigger learning. Make sure ROS2 is running."
-        }
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
